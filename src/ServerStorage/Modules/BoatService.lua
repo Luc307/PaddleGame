@@ -19,6 +19,8 @@ export type BoatRecord = {
 	strokes: { BoatPhysics.Stroke },
 	occupants: { [Player]: SeatBinding },
 	lastStrokeAt: { [Player]: number },
+	serverAuthority: boolean,
+	driver: Player?,
 }
 
 export type PaddleValidator = (player: Player, boat: BoatRecord, side: PaddleSide) -> boolean
@@ -49,8 +51,8 @@ local function ensureHeartbeat()
 	heartbeatConnection = RunService.Heartbeat:Connect(function(dt)
 		local now = os.clock()
 		for _, boat in boats do
-			-- Boot mit Fahrer: Client simuliert lokal (NetworkOwner). Server nur fuer leere Boote.
-			if next(boat.occupants) then
+			-- Race-/Team-Boote laufen serverseitig, normale Boote weiter per Fahrer-Client.
+			if next(boat.occupants) and not boat.serverAuthority then
 				continue
 			end
 			if #boat.strokes > 0 then
@@ -60,10 +62,35 @@ local function ensureHeartbeat()
 	end)
 end
 
+local function canSetNetworkOwner(part: BasePart): boolean
+	local root = part.AssemblyRootPart
+	return root ~= nil and not root.Anchored
+end
+
 local function setDriverOwnership(player: Player, part: BasePart)
+	if not canSetNetworkOwner(part) then
+		return
+	end
+
 	local root = part.AssemblyRootPart
 	if root then
-		root:SetNetworkOwner(player)
+		pcall(function()
+			root:SetNetworkOwnershipAuto(false)
+			root:SetNetworkOwner(player)
+		end)
+	end
+end
+
+local function setServerOwnership(part: BasePart)
+	if not canSetNetworkOwner(part) then
+		return
+	end
+
+	local root = part.AssemblyRootPart
+	if root then
+		pcall(function()
+			root:SetNetworkOwner(nil)
+		end)
 	end
 end
 
@@ -97,10 +124,15 @@ function BoatService.registerBoat(
 		id: string?,
 		physicsPart: BasePart?,
 		seats: { SeatBinding }?,
+		serverAuthority: boolean?,
 	}?
 )
 	local id = if options and options.id then options.id else model.Name
 	if boats[id] then
+		if boats[id].model ~= model then
+			warn(`[BoatService] Boot-ID "{id}" bereits vergeben, Registrierung abgebrochen`)
+			return nil
+		end
 		return boats[id]
 	end
 
@@ -128,7 +160,13 @@ function BoatService.registerBoat(
 		strokes = {},
 		occupants = {},
 		lastStrokeAt = {},
+		serverAuthority = if options then options.serverAuthority == true else false,
+		driver = nil,
 	}
+
+	if record.serverAuthority then
+		setServerOwnership(record.physicsPart)
+	end
 
 	for _, binding in seatBindings do
 		seatToBoatId[binding.part] = id
@@ -157,17 +195,53 @@ function BoatService.unregisterBoat(id: string)
 	boats[id] = nil
 end
 
+local function countOccupants(boat: BoatRecord): number
+	local total = 0
+	for _ in boat.occupants do
+		total += 1
+	end
+	return total
+end
+
+local function getFirstOccupant(boat: BoatRecord): Player?
+	for occupant in boat.occupants do
+		return occupant
+	end
+	return nil
+end
+
+local function attachOccupant(player: Player, boat: BoatRecord, binding: SeatBinding, asDriver: boolean?): SeatBinding
+	local isFirstOccupant = countOccupants(boat) == 0
+	local shouldDrive = asDriver == true or (asDriver == nil and isFirstOccupant)
+
+	boat.occupants[player] = binding
+	playerBoatId[player] = boat.id
+
+	if shouldDrive then
+		boat.driver = player
+		boat.strokes = {}
+	end
+
+	if boat.serverAuthority then
+		setServerOwnership(boat.physicsPart)
+	elseif shouldDrive then
+		setDriverOwnership(player, boat.physicsPart)
+	end
+
+	return binding
+end
+
 function BoatService.addOccupant(player: Player, boat: BoatRecord, seatPart: BasePart): SeatBinding?
 	for _, binding in boat.seatBindings do
 		if binding.part == seatPart then
-			boat.occupants[player] = binding
-			playerBoatId[player] = boat.id
-			boat.strokes = {}
-			setDriverOwnership(player, boat.physicsPart)
-			return binding
+			return attachOccupant(player, boat, binding)
 		end
 	end
 	return nil
+end
+
+function BoatService.addOccupantBinding(player: Player, boat: BoatRecord, binding: SeatBinding, asDriver: boolean?): SeatBinding
+	return attachOccupant(player, boat, binding, asDriver)
 end
 
 function BoatService.removeOccupant(player: Player)
@@ -182,38 +256,67 @@ function BoatService.removeOccupant(player: Player)
 		boat.lastStrokeAt[player] = nil
 		boat.strokes = {}
 
-		local root = boat.physicsPart.AssemblyRootPart
-		if root then
-			root:SetNetworkOwner(nil)
+		if boat.driver == player then
+			boat.driver = getFirstOccupant(boat)
+		end
+
+		local nextDriver = boat.driver
+		if nextDriver then
+			setDriverOwnership(nextDriver, boat.physicsPart)
+		else
+			boat.driver = nil
+			setServerOwnership(boat.physicsPart)
 		end
 	end
 
 	playerBoatId[player] = nil
 end
 
-function BoatService.tryPaddle(player: Player, side: PaddleSide): boolean
+function BoatService.getOccupantCount(boat: BoatRecord): number
+	return countOccupants(boat)
+end
+
+function BoatService.getOtherOccupants(boat: BoatRecord, player: Player): { Player }
+	local others = {}
+	for occupant in boat.occupants do
+		if occupant ~= player then
+			table.insert(others, occupant)
+		end
+	end
+	return others
+end
+
+function BoatService.tryPaddle(player: Player, side: PaddleSide): (boolean, number?)
 	if side ~= "left" and side ~= "right" then
 		return false
 	end
 
 	local boat = BoatService.getPlayerBoat(player)
 	if not boat then
-		return false
+		return false, nil
 	end
 
 	if not paddleValidator(player, boat, side) then
-		return false
+		return false, nil
 	end
 
 	local now = os.clock()
 	local lastAt = boat.lastStrokeAt[player] or 0
 	if now - lastAt < BoatConfig.STROKE_COOLDOWN then
-		return false
+		return false, nil
 	end
 
 	boat.lastStrokeAt[player] = now
-	-- Physik laeuft auf Fahrer-Client. Server validiert nur (spaeter: Anti-Cheat / 1v1 authority).
-	return true
+
+	return true, now
+end
+
+function BoatService.getDriver(boat: BoatRecord): Player?
+	return boat.driver
+end
+
+function BoatService.isTeamBoat(boat: BoatRecord): boolean
+	return countOccupants(boat) > 1
 end
 
 function BoatService.onPlayerRemoving(player: Player)

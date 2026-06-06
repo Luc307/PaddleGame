@@ -3,31 +3,74 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 
 local BoatService = require(ServerStorage.Modules.BoatService)
+local GameModeService = require(ServerStorage.Modules.GameMode.GameModeService)
+
+local function getOrCreateRemote(parent: Instance, name: string, isUnreliable: boolean): Instance
+	local child = parent:FindFirstChild(name)
+	local expectedClass = if isUnreliable then "UnreliableRemoteEvent" else "RemoteEvent"
+
+	if child and not child:IsA(expectedClass) then
+		child:Destroy()
+		child = nil
+	end
+
+	if not child then
+		child = if isUnreliable then Instance.new("UnreliableRemoteEvent") else Instance.new("RemoteEvent")
+		child.Name = name
+		child.Parent = parent
+	end
+	return child
+end
 
 local function getOrCreateRemoteEvent(...: string): RemoteEvent
 	local names = { ... }
 	local current: Instance = ReplicatedStorage:WaitForChild("Remotes")
 	for i, name in names do
-		local child = current:FindFirstChild(name)
-		if not child then
-			if i == #names then
-				child = Instance.new("RemoteEvent")
-			else
-				child = Instance.new("Folder")
-			end
-			child.Name = name
-			child.Parent = current
+		local isLeaf = i == #names
+		current = getOrCreateRemote(current, name, false)
+		if not isLeaf and not current:IsA("Folder") then
+			local folder = Instance.new("Folder")
+			folder.Name = name
+			folder.Parent = current.Parent
+			current:Destroy()
+			current = folder
 		end
-		current = child
 	end
 	return current :: RemoteEvent
 end
 
-local BoatPaddleEvent = getOrCreateRemoteEvent("Events", "BoatPaddle")
-local BoatControlEvent = getOrCreateRemoteEvent("Events", "BoatControl")
+local function getOrCreateUnreliableRemoteEvent(...: string): UnreliableRemoteEvent
+	local names = { ... }
+	local current: Instance = ReplicatedStorage:WaitForChild("Remotes")
+	for i, name in names do
+		local isLeaf = i == #names
+		current = getOrCreateRemote(current, name, isLeaf)
+		if not isLeaf and not current:IsA("Folder") then
+			local folder = Instance.new("Folder")
+			folder.Name = name
+			folder.Parent = current.Parent
+			current:Destroy()
+			current = folder
+		end
+	end
+	return current :: UnreliableRemoteEvent
+end
 
-local function notifyControl(player: Player, active: boolean, boatId: string?, paddleSide: string?)
-	BoatControlEvent:FireClient(player, active, boatId, paddleSide)
+local BoatPaddleEvent = getOrCreateUnreliableRemoteEvent("Events", "BoatPaddle")
+local BoatDriverStrokeEvent = getOrCreateUnreliableRemoteEvent("Events", "BoatDriverStroke")
+local BoatControlEvent = getOrCreateRemoteEvent("Events", "BoatControl")
+local RequestGameModeEvent = getOrCreateRemoteEvent("Events", "RequestGameMode")
+local RaceVisualsEvent = getOrCreateRemoteEvent("Events", "RaceVisuals")
+local QueueStatusEvent = getOrCreateRemoteEvent("Events", "QueueStatus")
+
+GameModeService.init({
+	BoatControl = BoatControlEvent,
+	RaceVisuals = RaceVisualsEvent,
+	QueueStatus = QueueStatusEvent,
+})
+
+local function notifyControl(player: Player, active: boolean, boatId: string?, paddleSide: string?, isDriver: boolean?)
+	BoatControlEvent:FireClient(player, active, boatId, paddleSide, isDriver)
 end
 
 local function onSeated(player: Player, humanoid: Humanoid, active: boolean, seatPart: BasePart?)
@@ -39,10 +82,14 @@ local function onSeated(player: Player, humanoid: Humanoid, active: boolean, sea
 
 		local binding = BoatService.addOccupant(player, boat, seatPart)
 		if binding then
-			notifyControl(player, true, boat.id, binding.paddleSide)
+			notifyControl(player, true, boat.id, binding.paddleSide, true)
 			print(`[Boat] {player.Name} steuerung aktiviert ({boat.id})`)
 		end
 	else
+		if GameModeService.isPlayerLocked(player) then
+			return
+		end
+
 		if BoatService.getPlayerBoat(player) then
 			BoatService.removeOccupant(player)
 			notifyControl(player, false, nil, nil)
@@ -73,8 +120,31 @@ local function onPlayerAdded(player: Player)
 	end
 end
 
-BoatPaddleEvent.OnServerEvent:Connect(function(player: Player, side: string)
-	BoatService.tryPaddle(player, side :: BoatService.PaddleSide)
+BoatPaddleEvent.OnServerEvent:Connect(function(player: Player, side: string, startTime: number?)
+	if side ~= "left" and side ~= "right" then
+		return
+	end
+
+	if not BoatService.tryPaddle(player, side :: BoatService.PaddleSide) then
+		return
+	end
+
+	local boat = BoatService.getPlayerBoat(player)
+	if not boat then
+		return
+	end
+
+	local driver = BoatService.getDriver(boat)
+	if not driver or driver == player then
+		return
+	end
+
+	local strokeTime = if typeof(startTime) == "number" then startTime else workspace:GetServerTimeNow()
+	BoatDriverStrokeEvent:FireClient(driver, boat.id, side, strokeTime)
+end)
+
+RequestGameModeEvent.OnServerEvent:Connect(function(player: Player, modeId: number)
+	GameModeService.requestMode(player, modeId)
 end)
 
 local boatModel = workspace:WaitForChild("Boat Model", 30)
