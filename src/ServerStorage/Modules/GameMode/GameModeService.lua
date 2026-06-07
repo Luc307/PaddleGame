@@ -230,7 +230,7 @@ local function activateBoatControl(player: Player, boat: BoatService.BoatRecord,
 	end
 
 	BoatService.addOccupantBinding(player, boat, binding, isDriver)
-	activeRemotes.BoatControl:FireClient(player, true, boat.id, binding.paddleSide, isDriver)
+	activeRemotes.BoatControl:FireClient(player, true, boat.id, binding.paddleSide, isDriver, boat.serverAuthority)
 end
 
 local function assignPlayersToBoat(
@@ -290,7 +290,7 @@ local function clearRaceVisuals(session: SessionRecord)
 	for _, team in session.teams do
 		for _, player in team.players do
 			activeRemotes.RaceVisuals:FireClient(player, { active = false })
-			activeRemotes.BoatControl:FireClient(player, false, nil, nil, nil)
+			activeRemotes.BoatControl:FireClient(player, false, nil, nil, nil, nil)
 		end
 	end
 end
@@ -422,7 +422,7 @@ local function createTeams(
 			id = boatId,
 			physicsPart = physicsPart,
 			seats = seatBindings,
-			serverAuthority = false,
+			serverAuthority = true,
 		})
 		if not boat then
 			boatsFolder:Destroy()

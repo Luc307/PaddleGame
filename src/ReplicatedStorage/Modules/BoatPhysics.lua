@@ -8,6 +8,7 @@ export type Stroke = {
 }
 
 local ENVELOPE_POWER = 0.65
+local INSTANT_KICK_FRACTION = 0.4
 
 local function computeEnvelopeIntegral(): number
 	local sum = 0
@@ -36,6 +37,20 @@ function BoatPhysics.strokeEnvelope(progress: number): number
 	return math.sin(math.pi * math.clamp(progress, 0, 1)) ^ ENVELOPE_POWER
 end
 
+function BoatPhysics.applyInstantKick(seat: BasePart, side: PaddleSide, config: typeof(BoatConfig))
+	local forward = BoatPhysics.getForwardVector(seat)
+	local kickSpeed = config.STROKE_FORWARD_SPEED * INSTANT_KICK_FRACTION
+	local kickTurn = config.STROKE_TURN_SPEED * INSTANT_KICK_FRACTION
+
+	local velocity = seat.AssemblyLinearVelocity
+	local horizontal = Vector3.new(velocity.X, 0, velocity.Z) + forward * kickSpeed
+	seat.AssemblyLinearVelocity = Vector3.new(horizontal.X, velocity.Y, horizontal.Z)
+
+	local angularVelocity = seat.AssemblyAngularVelocity
+	local yaw = angularVelocity.Y + (if side == "right" then kickTurn else -kickTurn)
+	seat.AssemblyAngularVelocity = Vector3.new(angularVelocity.X, yaw, angularVelocity.Z)
+end
+
 function BoatPhysics.apply(
 	seat: BasePart,
 	strokes: { Stroke },
@@ -58,6 +73,11 @@ function BoatPhysics.apply(
 			local rate = envelope / (ENVELOPE_INTEGRAL * config.STROKE_DURATION)
 			local frameSpeed = config.STROKE_FORWARD_SPEED * rate * dt
 			local frameTurn = config.STROKE_TURN_SPEED * rate * dt
+
+			if elapsed < dt then
+				frameSpeed += config.STROKE_FORWARD_SPEED * INSTANT_KICK_FRACTION
+				frameTurn += config.STROKE_TURN_SPEED * INSTANT_KICK_FRACTION
+			end
 
 			addLinear += forward * frameSpeed
 

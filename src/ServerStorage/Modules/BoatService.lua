@@ -1,5 +1,6 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 
 local BoatConfig = require(ReplicatedStorage.Modules.BoatConfig)
 local BoatPhysics = require(ReplicatedStorage.Modules.BoatPhysics)
@@ -49,7 +50,7 @@ local function ensureHeartbeat()
 	end
 
 	heartbeatConnection = RunService.Heartbeat:Connect(function(dt)
-		local now = os.clock()
+		local now = Workspace:GetServerTimeNow()
 		for _, boat in boats do
 			-- Race-/Team-Boote laufen serverseitig, normale Boote weiter per Fahrer-Client.
 			if next(boat.occupants) and not boat.serverAuthority then
@@ -286,29 +287,51 @@ function BoatService.getOtherOccupants(boat: BoatRecord, player: Player): { Play
 	return others
 end
 
-function BoatService.tryPaddle(player: Player, side: PaddleSide): (boolean, number?)
+local function getStrokeTime(startTime: number?): number
+	if typeof(startTime) == "number" then
+		return startTime
+	end
+	return Workspace:GetServerTimeNow()
+end
+
+function BoatService.applyBoatPhysics(boat: BoatRecord, dt: number)
+	if #boat.strokes == 0 then
+		return
+	end
+
+	local now = Workspace:GetServerTimeNow()
+	boat.strokes = BoatPhysics.apply(boat.physicsPart, boat.strokes, now, dt, BoatConfig)
+end
+
+function BoatService.tryPaddle(player: Player, side: PaddleSide, startTime: number?): boolean
 	if side ~= "left" and side ~= "right" then
 		return false
 	end
 
 	local boat = BoatService.getPlayerBoat(player)
 	if not boat then
-		return false, nil
+		return false
 	end
 
 	if not paddleValidator(player, boat, side) then
-		return false, nil
+		return false
 	end
 
 	local now = os.clock()
 	local lastAt = boat.lastStrokeAt[player] or 0
 	if now - lastAt < BoatConfig.STROKE_COOLDOWN then
-		return false, nil
+		return false
 	end
 
 	boat.lastStrokeAt[player] = now
 
-	return true, now
+	if boat.serverAuthority then
+		local strokeTime = getStrokeTime(startTime)
+		table.insert(boat.strokes, { side = side, startTime = strokeTime })
+		BoatService.applyBoatPhysics(boat, 1 / 60)
+	end
+
+	return true
 end
 
 function BoatService.getDriver(boat: BoatRecord): Player?

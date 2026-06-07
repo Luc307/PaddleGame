@@ -57,7 +57,6 @@ local function getOrCreateUnreliableRemoteEvent(...: string): UnreliableRemoteEv
 end
 
 local BoatPaddleEvent = getOrCreateUnreliableRemoteEvent("Events", "BoatPaddle")
-local BoatDriverStrokeEvent = getOrCreateUnreliableRemoteEvent("Events", "BoatDriverStroke")
 local BoatControlEvent = getOrCreateRemoteEvent("Events", "BoatControl")
 local RequestGameModeEvent = getOrCreateRemoteEvent("Events", "RequestGameMode")
 local RaceVisualsEvent = getOrCreateRemoteEvent("Events", "RaceVisuals")
@@ -69,8 +68,15 @@ GameModeService.init({
 	QueueStatus = QueueStatusEvent,
 })
 
-local function notifyControl(player: Player, active: boolean, boatId: string?, paddleSide: string?, isDriver: boolean?)
-	BoatControlEvent:FireClient(player, active, boatId, paddleSide, isDriver)
+local function notifyControl(
+	player: Player,
+	active: boolean,
+	boatId: string?,
+	paddleSide: string?,
+	isDriver: boolean?,
+	serverAuthority: boolean?
+)
+	BoatControlEvent:FireClient(player, active, boatId, paddleSide, isDriver, serverAuthority)
 end
 
 local function onSeated(player: Player, humanoid: Humanoid, active: boolean, seatPart: BasePart?)
@@ -82,7 +88,7 @@ local function onSeated(player: Player, humanoid: Humanoid, active: boolean, sea
 
 		local binding = BoatService.addOccupant(player, boat, seatPart)
 		if binding then
-			notifyControl(player, true, boat.id, binding.paddleSide, true)
+			notifyControl(player, true, boat.id, binding.paddleSide, true, boat.serverAuthority)
 			print(`[Boat] {player.Name} steuerung aktiviert ({boat.id})`)
 		end
 	else
@@ -92,7 +98,7 @@ local function onSeated(player: Player, humanoid: Humanoid, active: boolean, sea
 
 		if BoatService.getPlayerBoat(player) then
 			BoatService.removeOccupant(player)
-			notifyControl(player, false, nil, nil)
+			notifyControl(player, false, nil, nil, nil, nil)
 			print(`[Boat] {player.Name} steuerung deaktiviert`)
 		end
 	end
@@ -125,22 +131,8 @@ BoatPaddleEvent.OnServerEvent:Connect(function(player: Player, side: string, sta
 		return
 	end
 
-	if not BoatService.tryPaddle(player, side :: BoatService.PaddleSide) then
-		return
-	end
-
-	local boat = BoatService.getPlayerBoat(player)
-	if not boat then
-		return
-	end
-
-	local driver = BoatService.getDriver(boat)
-	if not driver or driver == player then
-		return
-	end
-
-	local strokeTime = if typeof(startTime) == "number" then startTime else workspace:GetServerTimeNow()
-	BoatDriverStrokeEvent:FireClient(driver, boat.id, side, strokeTime)
+	local strokeTime = if typeof(startTime) == "number" then startTime else nil
+	BoatService.tryPaddle(player, side :: BoatService.PaddleSide, strokeTime)
 end)
 
 RequestGameModeEvent.OnServerEvent:Connect(function(player: Player, modeId: number)

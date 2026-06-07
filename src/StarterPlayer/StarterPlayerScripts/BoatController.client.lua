@@ -10,7 +10,6 @@ local BoatPhysics = require(ReplicatedStorage.Modules.BoatPhysics) :: ModuleScri
 local player = Players.LocalPlayer
 
 local BoatPaddleEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Events"):WaitForChild("BoatPaddle") :: UnreliableRemoteEvent
-local BoatDriverStrokeEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Events"):WaitForChild("BoatDriverStroke") :: UnreliableRemoteEvent
 local BoatControlEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Events"):WaitForChild("BoatControl") :: RemoteEvent
 local RequestGameModeEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Events"):WaitForChild("RequestGameMode") :: RemoteEvent
 local RaceVisualsEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Events"):WaitForChild("RaceVisuals") :: RemoteEvent
@@ -26,6 +25,7 @@ local controlActive = false
 local allowedPaddleSide: string? = nil
 local activeBoatId: string? = nil
 local isDriver = false
+local serverAuthoritative = false
 
 local physicsPart: BasePart? = nil
 local strokes: { BoatPhysics.Stroke } = {}
@@ -113,7 +113,12 @@ end
 
 local function applyStrokeNow(side: string, startTime: number)
 	local part = physicsPart
-	if not part or not isDriver then
+	if not part then
+		return
+	end
+
+	if serverAuthoritative then
+		BoatPhysics.applyInstantKick(part, side :: BoatPhysics.PaddleSide, BoatConfig)
 		return
 	end
 
@@ -123,7 +128,7 @@ end
 
 local function updatePhysics(dt: number)
 	local part = physicsPart
-	if not part or not controlActive or not isDriver then
+	if not part or not controlActive or serverAuthoritative then
 		return
 	end
 
@@ -148,9 +153,7 @@ local function sendStroke(side: string)
 	local startTime = getStrokeTime()
 	playStrokeAnim(side)
 	applyStrokeNow(side, startTime)
-	if not isDriver then
-		BoatPaddleEvent:FireServer(side, startTime)
-	end
+	BoatPaddleEvent:FireServer(side, startTime)
 end
 
 local function requestMode(modeId: number)
@@ -187,7 +190,13 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean)
 	end
 end
 
-local function activateControl(humanoid: Humanoid, boatId: string?, paddleSide: string?, driver: boolean?)
+local function activateControl(
+	humanoid: Humanoid,
+	boatId: string?,
+	paddleSide: string?,
+	driver: boolean?,
+	authoritative: boolean?
+)
 	if controlActive then
 		return
 	end
@@ -201,13 +210,12 @@ local function activateControl(humanoid: Humanoid, boatId: string?, paddleSide: 
 	allowedPaddleSide = paddleSide
 	activeBoatId = boatId
 	isDriver = driver == true
+	serverAuthoritative = authoritative == true
 	strokes = {}
 
 	loadAnimTracks(humanoid)
 	inputConnection = UserInputService.InputBegan:Connect(onInputBegan)
-	if isDriver then
-		RunService:BindToRenderStep(PHYSICS_RENDER_STEP, Enum.RenderPriority.Input.Value, updatePhysics)
-	end
+	RunService:BindToRenderStep(PHYSICS_RENDER_STEP, Enum.RenderPriority.Input.Value, updatePhysics)
 
 	print(if isDriver then "steuerung aktiviert (driver)" else "steuerung aktiviert (team)")
 end
@@ -221,6 +229,7 @@ local function deactivateControl()
 	allowedPaddleSide = nil
 	activeBoatId = nil
 	isDriver = false
+	serverAuthoritative = false
 	physicsPart = nil
 	strokes = {}
 
@@ -267,15 +276,13 @@ local function clearLocalTransparency()
 	end
 end
 
-BoatDriverStrokeEvent.OnClientEvent:Connect(function(boatId: string, side: string, startTime: number?)
-	if not controlActive or not isDriver or activeBoatId ~= boatId then
-		return
-	end
-
-	applyStrokeNow(side, if typeof(startTime) == "number" then startTime else getStrokeTime())
-end)
-
-BoatControlEvent.OnClientEvent:Connect(function(active: boolean, boatId: string?, paddleSide: string?, driver: boolean?)
+BoatControlEvent.OnClientEvent:Connect(function(
+	active: boolean,
+	boatId: string?,
+	paddleSide: string?,
+	driver: boolean?,
+	authoritative: boolean?
+)
 	local character = player.Character
 	if not character then
 		return
@@ -287,7 +294,7 @@ BoatControlEvent.OnClientEvent:Connect(function(active: boolean, boatId: string?
 	end
 
 	if active then
-		activateControl(humanoid, boatId, paddleSide, driver)
+		activateControl(humanoid, boatId, paddleSide, driver, authoritative)
 	else
 		deactivateControl()
 	end
