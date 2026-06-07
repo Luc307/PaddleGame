@@ -2,16 +2,18 @@ local Players = game:GetService("Players")
 local SS = game:GetService("ServerStorage")
 local RS = game:GetService("ReplicatedStorage")
 
-local DataEvent = RS.Remotes.Events.Data
-local LoadingEvent = RS.Remotes.Events.Loading
+local Remotes = require(RS.Modules.RemoteRegistry)
 
-local DataFunction = RS.Remotes.Functions.Data
+local DataEvent = Remotes.Events.Data
+local LoadingEvent = Remotes.Events.Loading
+local DataFunction = Remotes.Functions.Data
 
 local PDM = require(SS.Modules.PlayerDataManager)
 local Help = require(SS.Modules.Help)
 
 local DanceAnimationId = "rbxassetid://126553137453494"
 local FADE_DURATION = 1
+local FADE_SETTLE_BUFFER = 0.15
 local SLOT_SPACING = 50
 local DANCE_LOAD_TIMEOUT = 5
 local DANCE_FALLBACK_DURATION = 4
@@ -182,6 +184,24 @@ local function waitForLanding(humanoid: Humanoid): boolean
 	return false
 end
 
+local function finishIntroState(player: Player, character: Model)
+	setAnimateEnabled(character, true)
+	Help.EnableControl(player)
+	releaseSlot(player)
+
+	local health = character:FindFirstChild("Health")
+	if health and health:IsA("Script") then
+		health.Disabled = false
+	end
+
+	player:SetAttribute("IntroComplete", true)
+end
+
+local function skipIntro(player: Player, character: Model)
+	finishIntroState(player, character)
+	LoadingEvent:FireClient(player, "Skip")
+end
+
 local function PlayerJoied(player: Player, character: Model, loadingCFrame: CFrame)
 	if player:GetAttribute("IntroComplete") then
 		return
@@ -199,7 +219,7 @@ local function PlayerJoied(player: Player, character: Model, loadingCFrame: CFra
 	freezeCharacter(humanoid, rootPart, loadingCFrame)
 
 	LoadingEvent:FireClient(player, "FadeOut")
-	task.wait(FADE_DURATION)
+	task.wait(FADE_DURATION + FADE_SETTLE_BUFFER)
 
 	local spawnCFrame = getSpawnCFrame()
 	local dropCFrame = spawnCFrame + Vector3.new(0, SPAWN_DROP_HEIGHT, 0)
@@ -216,7 +236,7 @@ local function PlayerJoied(player: Player, character: Model, loadingCFrame: CFra
 		landed = waitForLanding(humanoid)
 	end)
 
-	task.wait(FADE_DURATION)
+	task.wait(FADE_DURATION + FADE_SETTLE_BUFFER)
 
 	local deadline = os.clock() + LANDING_TIMEOUT
 	while not landed and os.clock() < deadline do
@@ -224,18 +244,7 @@ local function PlayerJoied(player: Player, character: Model, loadingCFrame: CFra
 	end
 
 	LoadingEvent:FireClient(player, "End")
-
-	setAnimateEnabled(character, true)
-	Help.EnableControl(player)
-	releaseSlot(player)
-
-	local health = character:FindFirstChild("Health")
-	if health and health:IsA("Script") then
-		health.Disabled = false
-	end
-
-	player:SetAttribute("IntroComplete", true)
-
+	finishIntroState(player, character)
 end
 
 local function ApplyBlockyR15(character: Model)
@@ -256,9 +265,14 @@ local function ApplyBlockyR15(character: Model)
 end
 
 local function onCharacterAdded(player: Player, character: Model)
-	if player:GetAttribute("IntroComplete") or TESTING then
+	if TESTING then
 		ApplyBlockyR15(character)
-		
+		skipIntro(player, character)
+		return
+	end
+
+	if player:GetAttribute("IntroComplete") then
+		ApplyBlockyR15(character)
 		return
 	end
 

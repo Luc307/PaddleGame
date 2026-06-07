@@ -8,8 +8,9 @@ local DISABLED_STATES = {
 }
 
 export type AttachmentRecord = {
-	weld: WeldConstraint,
+	weld: WeldConstraint?,
 	attachPart: BasePart,
+	localOffset: CFrame,
 	walkSpeed: number,
 	jumpPower: number,
 	jumpHeight: number,
@@ -41,6 +42,74 @@ function PlayerAttachmentService.isAttached(player: Player): boolean
 	return attachments[player] ~= nil
 end
 
+function PlayerAttachmentService.snapWithoutWeld(player: Player, attachPart: BasePart, localOffset: CFrame)
+	PlayerAttachmentService.detach(player)
+
+	local character, humanoid, rootPart = getCharacterParts(player)
+	if not character or not humanoid or not rootPart then
+		return
+	end
+
+	local disabledStates = {}
+	for _, state in DISABLED_STATES do
+		disabledStates[state] = humanoid:GetStateEnabled(state)
+		humanoid:SetStateEnabled(state, false)
+	end
+
+	local animate = character:FindFirstChild("Animate")
+	local animateWasEnabled: boolean? = nil
+	if animate and animate:IsA("Script") then
+		animateWasEnabled = not animate.Disabled
+		animate.Disabled = true
+	end
+
+	attachments[player] = {
+		weld = nil,
+		attachPart = attachPart,
+		localOffset = localOffset,
+		walkSpeed = humanoid.WalkSpeed,
+		jumpPower = humanoid.JumpPower,
+		jumpHeight = humanoid.JumpHeight,
+		autoJumpEnabled = humanoid.AutoJumpEnabled,
+		disabledStates = disabledStates,
+		animateWasEnabled = animateWasEnabled,
+	}
+
+	humanoid.Sit = false
+	humanoid.PlatformStand = true
+	humanoid.AutoJumpEnabled = false
+	humanoid.WalkSpeed = 0
+	humanoid.JumpPower = 0
+	humanoid.JumpHeight = 0
+	humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+
+	rootPart.Anchored = true
+	rootPart.CFrame = attachPart.CFrame * localOffset
+	rootPart.AssemblyLinearVelocity = Vector3.zero
+	rootPart.AssemblyAngularVelocity = Vector3.zero
+
+	pcall(function()
+		rootPart:SetNetworkOwner(nil)
+	end)
+end
+
+function PlayerAttachmentService.syncPositions()
+	for player, record in attachments do
+		if record.weld then
+			continue
+		end
+
+		local _, _, rootPart = getCharacterParts(player)
+		if not rootPart or not record.attachPart.Parent then
+			continue
+		end
+
+		rootPart.CFrame = record.attachPart.CFrame * record.localOffset
+		rootPart.AssemblyLinearVelocity = Vector3.zero
+		rootPart.AssemblyAngularVelocity = Vector3.zero
+	end
+end
+
 function PlayerAttachmentService.attach(player: Player, attachPart: BasePart, localOffset: CFrame)
 	PlayerAttachmentService.detach(player)
 
@@ -65,6 +134,7 @@ function PlayerAttachmentService.attach(player: Player, attachPart: BasePart, lo
 	local record: AttachmentRecord = {
 		weld = Instance.new("WeldConstraint"),
 		attachPart = attachPart,
+		localOffset = localOffset,
 		walkSpeed = humanoid.WalkSpeed,
 		jumpPower = humanoid.JumpPower,
 		jumpHeight = humanoid.JumpHeight,
@@ -103,6 +173,14 @@ function PlayerAttachmentService.detach(player: Player)
 
 	local character, humanoid = getCharacterParts(player)
 	if character and humanoid then
+		local rootPart = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if rootPart then
+			rootPart.Anchored = false
+			pcall(function()
+				rootPart:SetNetworkOwnershipAuto()
+			end)
+		end
+
 		for state, wasEnabled in record.disabledStates do
 			humanoid:SetStateEnabled(state, wasEnabled)
 		end

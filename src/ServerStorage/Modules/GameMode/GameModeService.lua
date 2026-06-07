@@ -1,7 +1,9 @@
 local Players = game:GetService("Players")
 local PhysicsService = game:GetService("PhysicsService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
+local BoatConfig = require(ReplicatedStorage.Modules.BoatConfig)
 local GameModeConfig = require(ReplicatedStorage.Modules.GameModeConfig)
 local BoatService = require(script.Parent.Parent.BoatService)
 local MapInstanceService = require(script.Parent.MapInstanceService)
@@ -32,6 +34,7 @@ type SessionRecord = {
 	startedAt: number,
 	mapInstance: MapInstance,
 	teams: { TeamRecord },
+	finishPart: BasePart?,
 	finishConnection: RBXScriptConnection?,
 	collisionGroups: { string },
 }
@@ -40,6 +43,7 @@ local GameModeService = {}
 
 local BOAT_TEMPLATE_NAME = "Boat Model"
 local GROUP_PREFIX = "RaceS"
+local FINISH_ZONE_MARGIN = Vector3.new(4, 6, 4)
 
 local remotes: Remotes? = nil
 local sessions: { [number]: SessionRecord } = {}
@@ -156,7 +160,7 @@ local function buildSeatBindings(model: Model, mode: ModeDefinition): ({ BoatSer
 	}, getPhysicsPart(model, seat)
 end
 
-local function getAttachmentOffset(index: number, teamControls: boolean): CFrame
+local function getSeatLocalOffset(index: number, teamControls: boolean): CFrame
 	if not teamControls then
 		return CFrame.new(0, 3, 0)
 	end
@@ -164,6 +168,11 @@ local function getAttachmentOffset(index: number, teamControls: boolean): CFrame
 		return CFrame.new(0, 3, 0)
 	end
 	return CFrame.new(if index == 2 then -2.5 else 2.5, 3, 0)
+end
+
+local function getAttachmentOffset(physicsPart: BasePart, seatPart: BasePart, index: number, teamControls: boolean): CFrame
+	local seatOnPhysics = physicsPart.CFrame:ToObjectSpace(seatPart.CFrame)
+	return seatOnPhysics * getSeatLocalOffset(index, teamControls)
 end
 
 local function ensureCollisionGroup(name: string)
@@ -223,14 +232,31 @@ local function applyTeamCollision(session: SessionRecord, team: TeamRecord)
 	end
 end
 
-local function activateBoatControl(player: Player, boat: BoatService.BoatRecord, binding: BoatService.SeatBinding, isDriver: boolean)
+local function activateBoatControl(
+	player: Player,
+	boat: BoatService.BoatRecord,
+	binding: BoatService.SeatBinding,
+	isDriver: boolean,
+	attachOffset: CFrame,
+	seatLocalOffset: CFrame
+)
 	local activeRemotes = remotes
 	if not activeRemotes then
 		return
 	end
 
 	BoatService.addOccupantBinding(player, boat, binding, isDriver)
-	activeRemotes.BoatControl:FireClient(player, true, boat.id, binding.paddleSide, isDriver)
+	activeRemotes.BoatControl:FireClient(
+		player,
+		true,
+		boat.id,
+		binding.paddleSide,
+		isDriver,
+		true,
+		attachOffset,
+		binding.part.Name,
+		seatLocalOffset
+	)
 end
 
 local function assignPlayersToBoat(
@@ -247,8 +273,10 @@ local function assignPlayersToBoat(
 		end
 
 		local attachPart = boat.physicsPart
-		PlayerAttachmentService.attach(player, attachPart, getAttachmentOffset(index, teamControls))
-		activateBoatControl(player, boat, binding, index == 1)
+		local seatLocalOffset = getSeatLocalOffset(index, teamControls)
+		local attachOffset = getAttachmentOffset(attachPart, binding.part, index, teamControls)
+		PlayerAttachmentService.snapWithoutWeld(player, attachPart, attachOffset)
+		activateBoatControl(player, boat, binding, index == 1, attachOffset, seatLocalOffset)
 	end
 end
 
@@ -290,7 +318,7 @@ local function clearRaceVisuals(session: SessionRecord)
 	for _, team in session.teams do
 		for _, player in team.players do
 			activeRemotes.RaceVisuals:FireClient(player, { active = false })
-			activeRemotes.BoatControl:FireClient(player, false, nil, nil, nil)
+			activeRemotes.BoatControl:FireClient(player, false, nil, nil, nil, nil, nil, nil, nil)
 		end
 	end
 end
@@ -359,25 +387,41 @@ local function handleTeamFinished(session: SessionRecord, team: TeamRecord)
 	finishSession(session)
 end
 
-local function getTouchedTeam(session: SessionRecord, touched: BasePart): TeamRecord?
+local function isBoatInFinishZone(boat: BoatService.BoatRecord, finishPart: BasePart): boolean
+	local relative = finishPart.CFrame:PointToObjectSpace(boat.physicsPart.Position)
+	local half = finishPart.Size * 0.5 + FINISH_ZONE_MARGIN
+
+	return math.abs(relative.X) <= half.X
+		and math.abs(relative.Y) <= half.Y
+		and math.abs(relative.Z) <= half.Z
+end
+
+local function pollFinish(session: SessionRecord)
+	local finishPart = session.finishPart
+	if not finishPart or not finishPart.Parent then
+		return
+	end
+
 	for _, team in session.teams do
-		if touched:IsDescendantOf(team.boatModel) then
-			return team
+		if team.finished then
+			continue
+		end
+
+		if isBoatInFinishZone(team.boat, finishPart) then
+			handleTeamFinished(session, team)
+			return
 		end
 	end
-	return nil
 end
 
 local function startFinishWatcher(session: SessionRecord, finishPart: BasePart)
-	session.finishConnection = finishPart.Touched:Connect(function(touched)
+	session.finishPart = finishPart
+	session.finishConnection = RunService.Heartbeat:Connect(function()
 		if not sessions[session.id] then
 			return
 		end
 
-		local team = getTouchedTeam(session, touched)
-		if team then
-			handleTeamFinished(session, team)
-		end
+		pollFinish(session)
 	end)
 end
 
@@ -407,10 +451,6 @@ local function createTeams(
 		prepareBoatClone(boatModel)
 		local boatId = `Session{mapInstance.id}_Mode{mode.id}_Team{teamId}`
 		boatModel.Name = boatId
-		boatModel.Parent = boatsFolder
-
-		local spawnCFrame = startPart.CFrame * CFrame.new(0, 2 + teamId * 0.2, 0) * CFrame.Angles(0, math.pi, 0)
-		boatModel:PivotTo(spawnCFrame)
 
 		local seatBindings, physicsPart = buildSeatBindings(boatModel, mode)
 		if not seatBindings or not physicsPart then
@@ -418,11 +458,20 @@ local function createTeams(
 			return nil
 		end
 
+		local spawnCFrame = startPart.CFrame
+			* BoatConfig.RACE_SPAWN_SEAT_OFFSET
+			* CFrame.new(0, teamId * BoatConfig.RACE_SPAWN_TEAM_Y_STEP, 0)
+			* CFrame.Angles(0, BoatConfig.RACE_SPAWN_YAW, 0)
+
+		BoatService.moveModelByAnchor(boatModel, seatBindings[1].part, spawnCFrame)
+		boatModel.PrimaryPart = physicsPart
+		boatModel.Parent = boatsFolder
+
 		local boat = BoatService.registerBoat(boatModel, {
 			id = boatId,
 			physicsPart = physicsPart,
 			seats = seatBindings,
-			serverAuthority = false,
+			serverAuthority = true,
 		})
 		if not boat then
 			boatsFolder:Destroy()
@@ -541,6 +590,7 @@ function GameModeService.startSession(modeId: number, participants: { Player }):
 		startedAt = 0,
 		mapInstance = mapInstance,
 		teams = teams,
+		finishPart = finishPart,
 		finishConnection = nil,
 		collisionGroups = {},
 	}

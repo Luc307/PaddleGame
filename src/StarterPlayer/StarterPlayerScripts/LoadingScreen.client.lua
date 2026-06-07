@@ -3,7 +3,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
-local LoadingEvent = ReplicatedStorage.Remotes.Events.Loading
+local Remotes = require(ReplicatedStorage.Modules.RemoteRegistry) :: ModuleScript
+local LoadingEvent = Remotes.Events.Loading
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
@@ -22,24 +23,96 @@ local CUSTOM_CAMERA_TRANSITION = 0.6
 local whiteCanvas: BasePart? = nil
 local whiteFloor: BasePart? = nil
 local fadeFrame: Frame? = nil
+local activeFadeTween: Tween? = nil
+local fadeQueue: { () -> () } = {}
+local fadeQueueRunning = false
 local cameraConnection: RBXScriptConnection? = nil
 local savedCameraType: Enum.CameraType? = nil
 local stageForward: Vector3? = nil
 local smoothedFallCFrame: CFrame? = nil
 
-local function getFadeGui(): Frame
+local function ensureFadeGui(): Frame
 	if fadeFrame and fadeFrame.Parent then
 		return fadeFrame
 	end
 
 	local playerGui = player:WaitForChild("PlayerGui")
-	local fadeGui = playerGui:WaitForChild("LoadingFade")
-	fadeFrame = fadeGui:WaitForChild("Fade") :: Frame
+	local screenGui = playerGui:FindFirstChild("LoadingFade")
+
+	if not screenGui or not screenGui:IsA("ScreenGui") then
+		screenGui = Instance.new("ScreenGui")
+		screenGui.Name = "LoadingFade"
+		screenGui.Parent = playerGui
+	end
+
+	screenGui.ResetOnSpawn = false
+	screenGui.IgnoreGuiInset = true
+	screenGui.DisplayOrder = 1000
+	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	screenGui.Enabled = true
+
+	local frame = screenGui:FindFirstChild("Fade")
+	if not frame or not frame:IsA("GuiObject") then
+		if frame then
+			frame:Destroy()
+		end
+
+		frame = Instance.new("Frame")
+		frame.Name = "Fade"
+		frame.Parent = screenGui
+	end
+
+	frame.BackgroundColor3 = Color3.new(0, 0, 0)
+	frame.BorderSizePixel = 0
+	frame.Size = UDim2.fromScale(1, 1)
+	frame.Position = UDim2.fromScale(0, 0)
+	frame.ZIndex = 1
+
+	fadeFrame = frame :: Frame
 	return fadeFrame :: Frame
 end
 
+local function runFadeQueue()
+	if fadeQueueRunning then
+		return
+	end
+
+	fadeQueueRunning = true
+	while #fadeQueue > 0 do
+		local job = table.remove(fadeQueue, 1)
+		job()
+	end
+	fadeQueueRunning = false
+end
+
+local function enqueueFade(job: () -> ())
+	table.insert(fadeQueue, job)
+	runFadeQueue()
+end
+
+local function tweenFadeTransparency(targetTransparency: number)
+	local frame = ensureFadeGui()
+	frame.BackgroundColor3 = Color3.new(0, 0, 0)
+
+	if activeFadeTween then
+		activeFadeTween:Cancel()
+		activeFadeTween = nil
+	end
+
+	local tween = TweenService:Create(
+		frame,
+		TweenInfo.new(FADE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{ BackgroundTransparency = targetTransparency }
+	)
+	activeFadeTween = tween
+	tween:Play()
+	tween.Completed:Wait()
+	activeFadeTween = nil
+end
+
 local function setBlackScreen()
-	getFadeGui().BackgroundTransparency = 0
+	local frame = ensureFadeGui()
+	frame.BackgroundTransparency = 0
 end
 
 local function createWhitePart(name: string, size: Vector3): Part
@@ -124,7 +197,40 @@ local function hideCanvas()
 	end
 end
 
+local function skipIntro()
+	table.clear(fadeQueue)
+	fadeQueueRunning = false
+
+	if activeFadeTween then
+		activeFadeTween:Cancel()
+		activeFadeTween = nil
+	end
+
+	hideCanvas()
+	stopCameraUpdates()
+	RunService:UnbindFromRenderStep("LoadingFallCamera")
+
+	local screenGui = fadeFrame and fadeFrame.Parent
+	fadeFrame = nil
+	if screenGui then
+		screenGui:Destroy()
+	end
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		camera.CameraSubject = humanoid
+	end
+
+	camera.CameraType = savedCameraType or Enum.CameraType.Custom
+	savedCameraType = nil
+	stageForward = nil
+	smoothedFallCFrame = nil
+end
+
 local function startLoading(character: Model, forward: Vector3)
+	setBlackScreen()
+
 	stageForward = forward
 	smoothedFallCFrame = nil
 
@@ -146,19 +252,13 @@ local function startLoading(character: Model, forward: Vector3)
 		updateLoadingView(character)
 	end
 
-	getFadeGui().BackgroundTransparency = 1
+	enqueueFade(function()
+		tweenFadeTransparency(1)
+	end)
 end
 
 local function fadeToBlack()
-	local frame = getFadeGui()
-	local tween = TweenService:Create(
-		frame,
-		TweenInfo.new(FADE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{ BackgroundTransparency = 0 }
-	)
-	tween:Play()
-	tween.Completed:Wait()
-
+	tweenFadeTransparency(0)
 	hideCanvas()
 end
 
@@ -184,15 +284,7 @@ end
 
 local function fadeFromBlack(character: Model)
 	startFallCamera(character)
-
-	local frame = getFadeGui()
-	local tween = TweenService:Create(
-		frame,
-		TweenInfo.new(FADE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-		{ BackgroundTransparency = 1 }
-	)
-	tween:Play()
-	tween.Completed:Wait()
+	tweenFadeTransparency(1)
 end
 
 local function getCustomCameraCFrame(root: BasePart): CFrame
@@ -245,19 +337,11 @@ local function finishIntro(character: Model)
 		end
 	end)
 
-	local fadeGui = getFadeGui()
-	if fadeGui and fadeGui.Parent then
-		fadeGui.Parent:Destroy()
+	local screenGui = fadeFrame and fadeFrame.Parent
+	fadeFrame = nil
+	if screenGui then
+		screenGui:Destroy()
 	end
-end
-
-local function onCharacterAdded()
-	setBlackScreen()
-end
-
-player.CharacterAdded:Connect(onCharacterAdded)
-if player.Character then
-	onCharacterAdded()
 end
 
 LoadingEvent.OnClientEvent:Connect(function(action: string, forward: Vector3?)
@@ -269,10 +353,14 @@ LoadingEvent.OnClientEvent:Connect(function(action: string, forward: Vector3?)
 	if action == "Start" and forward then
 		startLoading(character, forward)
 	elseif action == "FadeOut" then
-		fadeToBlack()
+		enqueueFade(fadeToBlack)
 	elseif action == "FadeIn" then
-		fadeFromBlack(character)
+		enqueueFade(function()
+			fadeFromBlack(character)
+		end)
 	elseif action == "End" then
 		finishIntro(character)
+	elseif action == "Skip" then
+		skipIntro()
 	end
 end)
