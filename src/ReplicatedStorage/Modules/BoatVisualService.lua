@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
+local BoatAuthoritySync = require(script.Parent.BoatAuthoritySync)
 local BoatCheckpoint = require(script.Parent.BoatCheckpoint)
 local BoatConfig = require(script.Parent.BoatConfig)
 local BoatPhysics = require(script.Parent.BoatPhysics)
@@ -22,7 +23,8 @@ type VisualRecord = {
 	strokeCount: number,
 	checkpointSentForIdle: boolean,
 	hiddenAuthorityParts: { BasePart },
-	state: BoatPhysics.KinematicState,
+	simState: BoatPhysics.KinematicState,
+	displayState: BoatPhysics.KinematicState,
 	timeAccumulator: number,
 }
 
@@ -33,6 +35,10 @@ local renderBound = false
 
 local function getStrokeTime(): number
 	return Workspace:GetServerTimeNow()
+end
+
+local function isRecordIdle(record: VisualRecord): boolean
+	return BoatCheckpoint.isIdle(record.strokes, getStrokeTime())
 end
 
 local function resolveAuthorityModel(boatId: string): Model?
@@ -114,7 +120,7 @@ local function restoreAuthorityModel(authorityModel: Model, hiddenParts: { BaseP
 end
 
 local function syncVisualTransform(record: VisualRecord)
-	local target = record.state.cframe
+	local target = record.displayState.cframe
 	local current = record.root.CFrame
 	local delta = target * current:Inverse()
 
@@ -127,7 +133,8 @@ end
 
 local function stepVisual(record: VisualRecord, dt: number)
 	local now = getStrokeTime()
-	record.strokes = BoatPhysics.applyKinematic(record.state, record.strokes, now, dt, BoatConfig)
+	record.strokes = BoatPhysics.applyKinematic(record.simState, record.strokes, now, dt, BoatConfig)
+	BoatAuthoritySync.alignState(record.displayState, record.simState)
 	syncVisualTransform(record)
 end
 
@@ -201,9 +208,11 @@ local function alignVisual(record: VisualRecord)
 		return
 	end
 
-	record.state.cframe = resolveSpawnCFrame(record, authorityRoot)
-	record.state.linearVelocity = Vector3.zero
-	record.state.angularVelocity = Vector3.zero
+	local spawnCFrame = resolveSpawnCFrame(record, authorityRoot)
+	record.simState.cframe = spawnCFrame
+	record.simState.linearVelocity = Vector3.zero
+	record.simState.angularVelocity = Vector3.zero
+	BoatAuthoritySync.alignState(record.displayState, record.simState)
 	syncVisualTransform(record)
 	setAuthorityVisibility(record.authorityModel, record.hiddenAuthorityParts, BoatConfig.TEST)
 end
@@ -260,6 +269,11 @@ function BoatVisualService.start(
 	end
 
 	local hiddenParts = hideAuthorityModel(authorityModel)
+	local initialState = {
+		cframe = authorityRoot.CFrame,
+		linearVelocity = Vector3.zero,
+		angularVelocity = Vector3.zero,
+	}
 
 	visuals[boatId] = {
 		boatId = boatId,
@@ -274,11 +288,8 @@ function BoatVisualService.start(
 		strokeCount = 0,
 		checkpointSentForIdle = false,
 		hiddenAuthorityParts = hiddenParts,
-		state = {
-			cframe = authorityRoot.CFrame,
-			linearVelocity = Vector3.zero,
-			angularVelocity = Vector3.zero,
-		},
+		simState = BoatAuthoritySync.copyState(initialState),
+		displayState = BoatAuthoritySync.copyState(initialState),
 		timeAccumulator = 0,
 	}
 
@@ -330,6 +341,9 @@ function BoatVisualService.applyStroke(boatId: string, side: string, startTime: 
 	record.checkpointSentForIdle = false
 end
 
+function BoatVisualService.beginRetarget(_boatId: string, _payload: BoatAuthoritySync.AuthorityStatePayload)
+end
+
 function BoatVisualService.getCharacterCFrame(boatId: string): CFrame?
 	local record = visuals[boatId]
 	if record and record.seatPart.Parent then
@@ -338,12 +352,26 @@ function BoatVisualService.getCharacterCFrame(boatId: string): CFrame?
 	return nil
 end
 
+function BoatVisualService.getTeamMemberCFrame(boatId: string, seatName: string, seatLocalOffset: CFrame): CFrame?
+	local record = visuals[boatId]
+	if not record or not record.model.Parent then
+		return nil
+	end
+
+	local seat = resolveSeatPart(record.model, seatName)
+	if not seat then
+		return nil
+	end
+
+	return seat.CFrame * seatLocalOffset
+end
+
 function BoatVisualService.isIdle(boatId: string): boolean
 	local record = visuals[boatId]
 	if not record then
 		return false
 	end
-	return BoatCheckpoint.isIdle(record.strokes, getStrokeTime())
+	return isRecordIdle(record)
 end
 
 function BoatVisualService.shouldSendCheckpoint(boatId: string): boolean
@@ -352,7 +380,7 @@ function BoatVisualService.shouldSendCheckpoint(boatId: string): boolean
 		return false
 	end
 
-	if not BoatCheckpoint.isIdle(record.strokes, getStrokeTime()) or record.checkpointSentForIdle then
+	if not isRecordIdle(record) or record.checkpointSentForIdle then
 		return false
 	end
 
@@ -369,9 +397,9 @@ function BoatVisualService.getCheckpoint(boatId: string): BoatCheckpoint.Checkpo
 	return {
 		boatId = boatId,
 		serverTime = getStrokeTime(),
-		cframe = record.state.cframe,
-		linearVelocity = record.state.linearVelocity,
-		angularVelocity = record.state.angularVelocity,
+		cframe = record.simState.cframe,
+		linearVelocity = record.simState.linearVelocity,
+		angularVelocity = record.simState.angularVelocity,
 		strokeCount = record.strokeCount,
 	}
 end

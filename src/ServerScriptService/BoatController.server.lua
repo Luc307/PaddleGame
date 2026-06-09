@@ -11,6 +11,7 @@ local BoatPaddleEvent = Remotes.Events.BoatPaddle
 local BoatDriverStrokeEvent = Remotes.Events.BoatDriverStroke
 local BoatControlEvent = Remotes.Events.BoatControl
 local BoatCheckpointEvent = Remotes.Events.BoatCheckpoint
+local BoatAuthorityStateEvent = Remotes.Events.BoatAuthorityState
 local RequestGameModeEvent = Remotes.Events.RequestGameMode
 
 GameModeService.init({
@@ -100,6 +101,12 @@ BoatPaddleEvent.OnServerEvent:Connect(function(player: Player, side: string, sta
 
 	if strokeTime then
 		broadcastStroke(player, boat, side :: BoatService.PaddleSide, strokeTime)
+	end
+end)
+
+BoatService.setAuthorityStateBroadcaster(function(boat, payload)
+	for _, occupant in BoatService.getOccupants(boat) do
+		BoatAuthorityStateEvent:FireClient(occupant, payload)
 	end
 end)
 

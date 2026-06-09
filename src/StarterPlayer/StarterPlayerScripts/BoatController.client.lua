@@ -9,6 +9,7 @@ local BoatPhysics = require(ReplicatedStorage.Modules.BoatPhysics) :: ModuleScri
 local Remotes = require(ReplicatedStorage.Modules.RemoteRegistry) :: ModuleScript
 
 local BoatCharacterFollower = require(ReplicatedStorage.Modules.BoatCharacterFollower)
+local BoatTeamCharacterPlacer = require(ReplicatedStorage.Modules.BoatTeamCharacterPlacer)
 local BoatVisualService = require(ReplicatedStorage.Modules.BoatVisualService)
 
 local player = Players.LocalPlayer
@@ -17,6 +18,7 @@ local BoatPaddleEvent = Remotes.Events.BoatPaddle
 local BoatDriverStrokeEvent = Remotes.Events.BoatDriverStroke
 local BoatControlEvent = Remotes.Events.BoatControl
 local BoatCheckpointEvent = Remotes.Events.BoatCheckpoint
+local BoatAuthorityStateEvent = Remotes.Events.BoatAuthorityState
 local RequestGameModeEvent = Remotes.Events.RequestGameMode
 local RaceVisualsEvent = Remotes.Events.RaceVisuals
 local QueueStatusEvent = Remotes.Events.QueueStatus
@@ -45,6 +47,7 @@ local animator: Animator? = nil
 local animTracks: { [string]: AnimationTrack } = {}
 local transparentBoatIds: { [string]: boolean } = {}
 local transparentUserIds: { [number]: boolean } = {}
+local teamRoster: { BoatTeamCharacterPlacer.TeamRosterEntry } = {}
 
 local function getStrokeAnimId(side: string): string?
 	if side == "right" then
@@ -140,7 +143,7 @@ local function updateFreeRoamPhysics(dt: number)
 end
 
 local function sendCheckpointToServer(force: boolean)
-	if not useVisualBoat or not isDriver or not activeBoatId then
+	if not useVisualBoat or not activeBoatId then
 		return
 	end
 
@@ -182,7 +185,7 @@ local function sendStroke(side: string)
 	local startTime = getStrokeTime()
 	playStrokeAnim(side)
 
-	if useVisualBoat and isDriver then
+	if useVisualBoat then
 		sendCheckpointToServer(true)
 	end
 
@@ -270,8 +273,10 @@ local function activateControl(
 			end)
 		end
 
-		if isDriver then
-			sendCheckpointToServer(true)
+		sendCheckpointToServer(true)
+
+		if #teamRoster > 0 then
+			BoatTeamCharacterPlacer.start(boatId, teamRoster)
 		end
 	else
 		physicsPart = resolvePhysicsPart(boatId)
@@ -311,6 +316,7 @@ local function deactivateControl()
 	if useVisualBoat and activeBoatId then
 		BoatVisualService.stop(activeBoatId)
 		BoatCharacterFollower.stop()
+		BoatTeamCharacterPlacer.stop()
 	elseif physicsPart then
 		RunService:UnbindFromRenderStep(PHYSICS_RENDER_STEP)
 	end
@@ -426,6 +432,18 @@ local function clearLocalTransparency()
 	end
 end
 
+BoatAuthorityStateEvent.OnClientEvent:Connect(function(payload)
+	if typeof(payload) ~= "table" or typeof(payload.boatId) ~= "string" then
+		return
+	end
+
+	if not controlActive or activeBoatId ~= payload.boatId then
+		return
+	end
+
+	BoatVisualService.beginRetarget(payload.boatId, payload)
+end)
+
 BoatDriverStrokeEvent.OnClientEvent:Connect(function(boatId: string, side: string, startTime: number?)
 	if not controlActive or activeBoatId ~= boatId then
 		return
@@ -483,8 +501,10 @@ RaceVisualsEvent.OnClientEvent:Connect(function(data)
 	clearLocalTransparency()
 	transparentBoatIds = {}
 	transparentUserIds = {}
+	teamRoster = {}
 
 	if not data or data.active == false then
+		BoatTeamCharacterPlacer.stop()
 		if visualConnection then
 			visualConnection:Disconnect()
 			visualConnection = nil
@@ -492,11 +512,27 @@ RaceVisualsEvent.OnClientEvent:Connect(function(data)
 		return
 	end
 
-	for _, boatId in data.transparentBoatIds or {} do
-		transparentBoatIds[boatId] = true
+	for _, transparentBoatId in data.transparentBoatIds or {} do
+		transparentBoatIds[transparentBoatId] = true
 	end
 	for _, userId in data.transparentUserIds or {} do
 		transparentUserIds[userId] = true
+	end
+
+	for _, entry in data.teamRoster or {} do
+		if typeof(entry.userId) == "number" and typeof(entry.seatName) == "string" then
+			table.insert(teamRoster, {
+				userId = entry.userId,
+				seatName = entry.seatName,
+				seatLocalOffset = if typeof(entry.seatLocalOffset) == "CFrame"
+					then entry.seatLocalOffset
+					else CFrame.new(0, 3, 0),
+			})
+		end
+	end
+
+	if controlActive and useVisualBoat and activeBoatId and #teamRoster > 0 then
+		BoatTeamCharacterPlacer.start(activeBoatId, teamRoster)
 	end
 
 	applyLocalTransparency()

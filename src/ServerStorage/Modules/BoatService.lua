@@ -14,6 +14,8 @@ export type SeatBinding = {
 	paddleSide: PaddleSide?,
 }
 
+export type AuthorityStateBroadcaster = (boat: BoatRecord, payload: BoatCheckpoint.CheckpointPayload) -> ()
+
 export type BoatRecord = {
 	id: string,
 	model: Model,
@@ -26,6 +28,7 @@ export type BoatRecord = {
 	driver: Player?,
 	strokeCount: number,
 	kinematicState: BoatPhysics.KinematicState?,
+	lastIdleBroadcastAt: number,
 }
 
 export type PaddleValidator = (player: Player, boat: BoatRecord, side: PaddleSide) -> boolean
@@ -48,6 +51,7 @@ end
 
 local heartbeatConnection: RBXScriptConnection? = nil
 local heartbeatAccumulator = 0
+local authorityStateBroadcaster: AuthorityStateBroadcaster? = nil
 
 function BoatService.moveModelByAnchor(model: Model, anchorPart: BasePart, targetCFrame: CFrame)
 	local delta = targetCFrame * anchorPart.CFrame:Inverse()
@@ -210,6 +214,7 @@ function BoatService.registerBoat(
 		driver = nil,
 		strokeCount = 0,
 		kinematicState = nil,
+		lastIdleBroadcastAt = 0,
 	}
 
 	if record.serverAuthority then
@@ -398,6 +403,72 @@ function BoatService.getStrokeCount(boat: BoatRecord): number
 	return boat.strokeCount
 end
 
+function BoatService.setAuthorityStateBroadcaster(broadcaster: AuthorityStateBroadcaster?)
+	authorityStateBroadcaster = broadcaster
+end
+
+function BoatService.buildAuthorityPayload(boat: BoatRecord): BoatCheckpoint.CheckpointPayload?
+	local state = boat.kinematicState
+	if not state then
+		return nil
+	end
+
+	return {
+		boatId = boat.id,
+		serverTime = Workspace:GetServerTimeNow(),
+		cframe = state.cframe,
+		linearVelocity = state.linearVelocity,
+		angularVelocity = state.angularVelocity,
+		strokeCount = boat.strokeCount,
+	}
+end
+
+function BoatService.broadcastAuthorityState(boat: BoatRecord)
+	if not authorityStateBroadcaster then
+		return
+	end
+
+	local payload = BoatService.buildAuthorityPayload(boat)
+	if payload then
+		authorityStateBroadcaster(boat, payload)
+	end
+end
+
+function BoatService.validateCheckpoint(
+	boat: BoatRecord,
+	payload: BoatCheckpoint.CheckpointPayload,
+	_force: boolean?
+): (boolean, string?)
+	if typeof(payload.cframe) ~= "CFrame" then
+		return false, "invalid_cframe"
+	end
+
+	if typeof(payload.linearVelocity) ~= "Vector3" or typeof(payload.angularVelocity) ~= "Vector3" then
+		return false, "invalid_velocity"
+	end
+
+	local state = boat.kinematicState
+	if not state then
+		return false, "no_kinematic_state"
+	end
+
+	if typeof(payload.strokeCount) == "number" and payload.strokeCount < boat.strokeCount then
+		return false, "stale_stroke_count"
+	end
+
+	local _delta, canSync, shouldReject = BoatCheckpoint.evaluateDelta(state.cframe, payload.cframe)
+
+	if shouldReject then
+		return false, "delta_too_large"
+	end
+
+	if not canSync then
+		return false, "delta_out_of_sync_range"
+	end
+
+	return true, "validated"
+end
+
 function BoatService.applyCheckpoint(
 	boat: BoatRecord,
 	payload: BoatCheckpoint.CheckpointPayload,
@@ -416,8 +487,14 @@ function BoatService.applyCheckpoint(
 		return false, "no_kinematic_state"
 	end
 
-	if typeof(payload.strokeCount) == "number" and payload.strokeCount >= boat.strokeCount then
-		boat.strokeCount = payload.strokeCount
+	if typeof(payload.strokeCount) == "number" and payload.strokeCount < boat.strokeCount then
+		return false, "stale_stroke_count"
+	end
+
+	local delta = (state.cframe.Position - payload.cframe.Position).Magnitude
+
+	if delta > BoatCheckpoint.HARD_LIMIT then
+		return false, "delta_too_large"
 	end
 
 	if force == true then
@@ -432,10 +509,9 @@ function BoatService.applyCheckpoint(
 		return false, "stale_stroke_count"
 	end
 
-	local delta = (state.cframe.Position - payload.cframe.Position).Magnitude
-
-	if delta > BoatCheckpoint.HARD_LIMIT then
-		return false, "delta_too_large"
+	local _delta, canSync, shouldReject = BoatCheckpoint.evaluateDelta(state.cframe, payload.cframe)
+	if shouldReject or not canSync then
+		return false, "delta_out_of_sync_range"
 	end
 
 	if delta <= BoatCheckpoint.SOFT_LIMIT then

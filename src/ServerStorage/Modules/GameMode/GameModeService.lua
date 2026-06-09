@@ -160,8 +160,11 @@ local function buildSeatBindings(model: Model, mode: ModeDefinition): ({ BoatSer
 	}, getPhysicsPart(model, seat)
 end
 
-local function getSeatLocalOffset(index: number, teamControls: boolean): CFrame
+local function getSeatLocalOffset(index: number, teamControls: boolean, dedicatedSeats: boolean): CFrame
 	if not teamControls then
+		return CFrame.new(0, 3, 0)
+	end
+	if dedicatedSeats then
 		return CFrame.new(0, 3, 0)
 	end
 	if index == 1 then
@@ -170,9 +173,22 @@ local function getSeatLocalOffset(index: number, teamControls: boolean): CFrame
 	return CFrame.new(if index == 2 then -2.5 else 2.5, 3, 0)
 end
 
-local function getAttachmentOffset(physicsPart: BasePart, seatPart: BasePart, index: number, teamControls: boolean): CFrame
+local function getAttachmentOffset(
+	physicsPart: BasePart,
+	seatPart: BasePart,
+	index: number,
+	teamControls: boolean,
+	dedicatedSeats: boolean
+): CFrame
 	local seatOnPhysics = physicsPart.CFrame:ToObjectSpace(seatPart.CFrame)
-	return seatOnPhysics * getSeatLocalOffset(index, teamControls)
+	return seatOnPhysics * getSeatLocalOffset(index, teamControls, dedicatedSeats)
+end
+
+local function hasDedicatedTeamSeats(seatBindings: { BoatService.SeatBinding }): boolean
+	if #seatBindings < 2 then
+		return false
+	end
+	return seatBindings[1].part ~= seatBindings[2].part
 end
 
 local function ensureCollisionGroup(name: string)
@@ -266,6 +282,8 @@ local function assignPlayersToBoat(
 	boatModel: Model,
 	teamControls: boolean
 )
+	local dedicatedSeats = teamControls and hasDedicatedTeamSeats(seatBindings)
+
 	for index, player in players do
 		local binding = seatBindings[index]
 		if not binding then
@@ -273,8 +291,8 @@ local function assignPlayersToBoat(
 		end
 
 		local attachPart = boat.physicsPart
-		local seatLocalOffset = getSeatLocalOffset(index, teamControls)
-		local attachOffset = getAttachmentOffset(attachPart, binding.part, index, teamControls)
+		local seatLocalOffset = getSeatLocalOffset(index, teamControls, dedicatedSeats)
+		local attachOffset = getAttachmentOffset(attachPart, binding.part, index, teamControls, dedicatedSeats)
 		PlayerAttachmentService.snapWithoutWeld(player, attachPart, attachOffset)
 		activateBoatControl(player, boat, binding, index == 1, attachOffset, seatLocalOffset)
 	end
@@ -287,6 +305,22 @@ local function sendRaceVisuals(session: SessionRecord)
 	end
 
 	for _, viewerTeam in session.teams do
+		local dedicatedSeats = session.mode.teamControls and hasDedicatedTeamSeats(viewerTeam.boat.seatBindings)
+		local teamRoster = {}
+
+		if session.mode.teamControls then
+			for index, rosterPlayer in viewerTeam.players do
+				local binding = viewerTeam.boat.seatBindings[index]
+				if binding then
+					table.insert(teamRoster, {
+						userId = rosterPlayer.UserId,
+						seatName = binding.part.Name,
+						seatLocalOffset = getSeatLocalOffset(index, true, dedicatedSeats),
+					})
+				end
+			end
+		end
+
 		for _, viewer in viewerTeam.players do
 			local transparentBoatIds = {}
 			local transparentUserIds = {}
@@ -304,6 +338,8 @@ local function sendRaceVisuals(session: SessionRecord)
 				active = true,
 				transparentBoatIds = transparentBoatIds,
 				transparentUserIds = transparentUserIds,
+				boatId = viewerTeam.boat.id,
+				teamRoster = teamRoster,
 			})
 		end
 	end

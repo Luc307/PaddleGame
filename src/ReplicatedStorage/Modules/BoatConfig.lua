@@ -15,7 +15,12 @@ local BoatConfig = {
 	RACE_SPAWN_YAW = math.pi,
 	RACE_SPAWN_TEAM_Y_STEP = 0.2,
 	-- true = Authority-Boot sichtbar (Debug), false = nur Visual-Boot
-	TEST = true,
+	TEST = false,
+	SYNC_MAX_DELTA = 4,
+	REJECT_DELTA = 12,
+	RETARGET_POSITION_EPSILON = 0.15,
+	RETARGET_MIN_UPDATE_DELTA = 0.08,
+	RETARGET_IDLE_NUDGE_BLEND = 0.2,
 }
 
 return BoatConfig

@@ -23,11 +23,6 @@ function BoatStateSync.tryApply(player: Player, payload: BoatCheckpoint.Checkpoi
 		return false, "not_occupant"
 	end
 
-	local driver = BoatService.getDriver(boat)
-	if driver ~= player then
-		return false, "not_driver"
-	end
-
 	return BoatService.applyCheckpoint(boat, payload, force)
 end
 

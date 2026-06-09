@@ -11,10 +11,17 @@ export type CheckpointPayload = {
 }
 
 local BoatCheckpoint = {
-	SOFT_LIMIT = 4,
-	HARD_LIMIT = 12,
+	SOFT_LIMIT = BoatConfig.SYNC_MAX_DELTA,
+	HARD_LIMIT = BoatConfig.REJECT_DELTA,
 	SOFT_BLEND = 0.3,
 }
+
+function BoatCheckpoint.evaluateDelta(serverCFrame: CFrame, clientCFrame: CFrame): (number, boolean, boolean)
+	local delta = (serverCFrame.Position - clientCFrame.Position).Magnitude
+	local canSync = delta <= BoatConfig.SYNC_MAX_DELTA
+	local shouldReject = delta > BoatConfig.REJECT_DELTA
+	return delta, canSync, shouldReject
+end
 
 function BoatCheckpoint.isIdle(strokes: { BoatPhysics.Stroke }, now: number): boolean
 	if #strokes == 0 then
