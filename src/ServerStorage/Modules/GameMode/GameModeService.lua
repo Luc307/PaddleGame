@@ -4,8 +4,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local BoatConfig = require(ReplicatedStorage.Modules.BoatConfig)
+local BoatShopConfig = require(ReplicatedStorage.Modules.BoatShopConfig)
 local GameModeConfig = require(ReplicatedStorage.Modules.GameModeConfig)
 local BoatService = require(script.Parent.Parent.BoatService)
+local BoatShopService = require(script.Parent.Parent.BoatShopService)
 local MapInstanceService = require(script.Parent.MapInstanceService)
 local PlayerAttachmentService = require(script.Parent.PlayerAttachmentService)
 local QueueService = require(script.Parent.QueueService)
@@ -41,7 +43,6 @@ type SessionRecord = {
 
 local GameModeService = {}
 
-local BOAT_TEMPLATE_NAME = "Boat Model"
 local GROUP_PREFIX = "RaceS"
 local FINISH_ZONE_MARGIN = Vector3.new(4, 6, 4)
 
@@ -90,16 +91,6 @@ local function validateParticipants(mode: ModeDefinition, participants: { Player
 	end
 
 	return true
-end
-
-local function getBoatTemplate(): Model?
-	local template = workspace:FindFirstChild(BOAT_TEMPLATE_NAME)
-	if template and template:IsA("Model") then
-		return template
-	end
-
-	warn(`[GameMode] Workspace["{BOAT_TEMPLATE_NAME}"] fehlt`)
-	return nil
 end
 
 local function prepareBoatClone(model: Model)
@@ -465,8 +456,7 @@ local function createTeams(
 	mapInstance: MapInstance,
 	mode: ModeDefinition,
 	participants: { Player },
-	startPart: BasePart,
-	template: Model
+	startPart: BasePart
 ): { TeamRecord }?
 	local teams = {}
 	local boatsFolder = Instance.new("Folder")
@@ -483,7 +473,15 @@ local function createTeams(
 			end
 		end
 
+		local template, _, boatId = BoatShopService.resolveBoatForTeam(teamPlayers, mode.teamControls)
+		if not template or not boatId then
+			boatsFolder:Destroy()
+			warn(`[GameMode] Kein Boot-Template fuer Team {teamId} in Modus {mode.id}`)
+			return nil
+		end
+
 		local boatModel = template:Clone()
+		BoatShopConfig.applyModelCorrection(boatModel, boatId)
 		prepareBoatClone(boatModel)
 		local boatId = `Session{mapInstance.id}_Mode{mode.id}_Team{teamId}`
 		boatModel.Name = boatId
@@ -551,6 +549,12 @@ function GameModeService.isPlayerLocked(player: Player): boolean
 	return PlayerAttachmentService.isAttached(player)
 end
 
+function GameModeService.canOpenShop(player: Player): boolean
+	return playerSessionId[player] == nil
+		and not QueueService.isQueued(player)
+		and not PlayerAttachmentService.isAttached(player)
+end
+
 function GameModeService.getPlayerSession(player: Player): SessionRecord?
 	local sessionId = playerSessionId[player]
 	if not sessionId then
@@ -593,11 +597,6 @@ function GameModeService.startSession(modeId: number, participants: { Player }):
 		return false
 	end
 
-	local template = getBoatTemplate()
-	if not template then
-		return false
-	end
-
 	sessionCounter += 1
 	local sessionId = sessionCounter
 
@@ -614,7 +613,7 @@ function GameModeService.startSession(modeId: number, participants: { Player }):
 		return false
 	end
 
-	local teams = createTeams(mapInstance, mode, participants, startPart, template)
+	local teams = createTeams(mapInstance, mode, participants, startPart)
 	if not teams then
 		MapInstanceService.release(sessionId)
 		return false

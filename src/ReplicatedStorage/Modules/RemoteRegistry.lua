@@ -21,6 +21,22 @@ local function getOrCreateEvent(name: string): Instance
 	return eventsFolder:WaitForChild(name, 30)
 end
 
+local function getOrCreateFunction(name: string): Instance
+	local existing = functionsFolder:FindFirstChild(name)
+	if existing then
+		return existing
+	end
+
+	if RunService:IsServer() then
+		local remoteFunction = Instance.new("RemoteFunction")
+		remoteFunction.Name = name
+		remoteFunction.Parent = functionsFolder
+		return remoteFunction
+	end
+
+	return functionsFolder:WaitForChild(name, 30)
+end
+
 local function getOrCreateUnreliableEvent(name: string): Instance
 	local existing = eventsFolder:FindFirstChild(name)
 	if existing then
@@ -49,8 +65,10 @@ return {
 		QueueStatus = eventsFolder:WaitForChild("QueueStatus") :: RemoteEvent,
 		Loading = eventsFolder:WaitForChild("Loading") :: RemoteEvent,
 		Data = eventsFolder:WaitForChild("Data") :: RemoteEvent,
+		ShopSelect = getOrCreateEvent("ShopSelect") :: RemoteEvent,
 	},
 	Functions = {
 		Data = functionsFolder:WaitForChild("Data") :: RemoteFunction,
+		ShopGetState = getOrCreateFunction("ShopGetState") :: RemoteFunction,
 	},
 }
