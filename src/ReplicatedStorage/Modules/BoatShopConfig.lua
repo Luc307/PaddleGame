@@ -1,12 +1,16 @@
 --[[
 	Studio manual setup:
-	- ReplicatedStorage/BoatTemplates/ -> Models: small, mid, big, huge
-	  Each needs PhysicsPart + Seat (solo) or SeatRight/SeatLeft (team)
+	- ReplicatedStorage/Replications/ -> Models: small, mid, big, huge + Paddle
+	  Boats: PhysicsPart + Seat-Anker (Part, kein Roblox Seat-Objekt)
+	    Solo: "Seat" | Team: "SeatRight" + "SeatLeft"
+	    Seat = unsichtbarer Anker wo HumanoidRootPart beim Sitzen liegt
+	  Paddle: HandleStart = oberer Griff (RightHand), alle Teile per Weld am Griff
+	    Teile: MainWater, HandleEnd, MainHandle, HandleStart, Texture1, Texture2
 	- StarterGui/ShopGui -> see ShopController.client.lua hierarchy comments
 ]]
 local BoatShopConfig = {}
 
-BoatShopConfig.TEMPLATE_FOLDER_NAME = "BoatTemplates"
+BoatShopConfig.TEMPLATE_FOLDER_NAME = "Replications"
 
 BoatShopConfig.BOAT_IDS = { "small", "mid", "big", "huge" }
 

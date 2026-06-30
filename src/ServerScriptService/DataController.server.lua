@@ -12,6 +12,8 @@ local DataFunction = Remotes.Functions.Data
 local PDM = require(SS.Modules.PlayerDataManager)
 local Help = require(SS.Modules.Help)
 
+-- dance id: 126553137453494
+
 local DanceAnimationId = "rbxassetid://126553137453494"
 local FADE_DURATION = 1
 local FADE_SETTLE_BUFFER = 0.15
@@ -185,6 +187,14 @@ local function waitForLanding(humanoid: Humanoid): boolean
 	return false
 end
 
+local function unlockModeInput(player: Player)
+	if not player.Parent then
+		return
+	end
+
+	player:SetAttribute("ModeInputAllowed", true)
+end
+
 local function finishIntroState(player: Player, character: Model)
 	setAnimateEnabled(character, true)
 	Help.EnableControl(player)
@@ -196,6 +206,12 @@ local function finishIntroState(player: Player, character: Model)
 	end
 
 	player:SetAttribute("IntroComplete", true)
+
+	if SettingsConfig.INTRO_ENABLED then
+		task.delay(SettingsConfig.INTRO_MODE_INPUT_LOCK_SECONDS, unlockModeInput, player)
+	else
+		unlockModeInput(player)
+	end
 end
 
 local function skipIntro(player: Player, character: Model)
@@ -279,8 +295,11 @@ local function onCharacterAdded(player: Player, character: Model)
 
 	if player:GetAttribute("IntroComplete") then
 		ApplyBlockyR15(character)
+		unlockModeInput(player)
 		return
 	end
+
+	player:SetAttribute("ModeInputAllowed", false)
 
 	local health = character:FindFirstChild("Health")
 	if health and health:IsA("Script") then

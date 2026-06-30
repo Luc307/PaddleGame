@@ -4,6 +4,7 @@ local ServerStorage = game:GetService("ServerStorage")
 
 local BoatService = require(ServerStorage.Modules.BoatService)
 local GameModeService = require(ServerStorage.Modules.GameMode.GameModeService)
+local PlayerAttachmentService = require(ServerStorage.Modules.GameMode.PlayerAttachmentService)
 local Remotes = require(ReplicatedStorage.Modules.RemoteRegistry)
 
 local BoatPaddleEvent = Remotes.Events.BoatPaddle
@@ -85,6 +86,7 @@ BoatPaddleEvent.OnServerEvent:Connect(function(player: Player, side: string, _st
 		return
 	end
 
+	PlayerAttachmentService.beginStroke(player, side :: "left" | "right")
 	BoatService.addStroke(player, side :: BoatService.PaddleSide)
 end)
 

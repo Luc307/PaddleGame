@@ -4,8 +4,10 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local Remotes = require(ReplicatedStorage.Modules.RemoteRegistry)
+local SettingsConfig = require(ReplicatedStorage.Modules.SettingsConfig)
 
 local PaddleAnimationController = require(script.Parent.PaddleAnimationController)
+local PaddleGripController = require(script.Parent.PaddleGripController)
 
 local player = Players.LocalPlayer
 
@@ -42,15 +44,32 @@ local function sendStroke(side: string)
 	end
 
 	PaddleAnimationController.handleInput(side :: "left" | "right")
+	PaddleGripController.beginStroke(side :: "left" | "right")
 	BoatPaddleEvent:FireServer(side)
 end
 
+local function canRequestMode(): boolean
+	if not SettingsConfig.INTRO_ENABLED then
+		return true
+	end
+
+	return player:GetAttribute("ModeInputAllowed") == true
+end
+
 local function requestMode(modeId: number)
+	if not canRequestMode() then
+		return
+	end
+
 	RequestGameModeEvent:FireServer(modeId)
 end
 
 local function onModeInputBegan(input: InputObject, gameProcessed: boolean)
 	if gameProcessed then
+		return
+	end
+
+	if not canRequestMode() then
 		return
 	end
 
@@ -99,6 +118,7 @@ local function activateControl(
 	teamControls = isTeamMode == true
 
 	PaddleAnimationController.init(humanoid, teamControls)
+	PaddleGripController.start(player.Character :: Model)
 	inputConnection = UserInputService.InputBegan:Connect(onInputBegan)
 
 	print(if teamControls
@@ -117,6 +137,7 @@ local function deactivateControl()
 	teamControls = false
 
 	PaddleAnimationController.stop()
+	PaddleGripController.stop()
 
 	if inputConnection then
 		inputConnection:Disconnect()

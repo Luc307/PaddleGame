@@ -45,7 +45,7 @@ function BoatShopService.getTemplate(boatId: string): Model?
 		return nil
 	end
 
-	local template = folder:FindFirstChild(boatId)
+	local template = folder:FindFirstChild(boatId) or folder:FindFirstChild("small")
 	if template and template:IsA("Model") then
 		return template
 	end

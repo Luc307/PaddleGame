@@ -6,6 +6,7 @@ local RunService = game:GetService("RunService")
 local PaddleConfig = require(ReplicatedStorage.Modules.PaddleConfig)
 local BoatShopConfig = require(ReplicatedStorage.Modules.BoatShopConfig)
 local GameModeConfig = require(ReplicatedStorage.Modules.GameModeConfig)
+local SettingsConfig = require(ReplicatedStorage.Modules.SettingsConfig)
 local BoatService = require(script.Parent.Parent.BoatService)
 local BoatShopService = require(script.Parent.Parent.BoatShopService)
 local MapInstanceService = require(script.Parent.MapInstanceService)
@@ -152,16 +153,15 @@ local function buildSeatBindings(model: Model, mode: ModeDefinition): ({ BoatSer
 end
 
 local function getSeatLocalOffset(index: number, teamControls: boolean, dedicatedSeats: boolean): CFrame
-	if not teamControls then
-		return CFrame.new(0, 3, 0)
-	end
-	if dedicatedSeats then
-		return CFrame.new(0, 3, 0)
+	local base = PaddleConfig.SEAT_CHARACTER_OFFSET
+	if not teamControls or dedicatedSeats then
+		return base
 	end
 	if index == 1 then
-		return CFrame.new(0, 3, 0)
+		return base
 	end
-	return CFrame.new(if index == 2 then -2.5 else 2.5, 3, 0)
+	local lateral = if index == 2 then -2.5 else 2.5
+	return base * CFrame.new(lateral, 0, 0)
 end
 
 local function hasDedicatedTeamSeats(seatBindings: { BoatService.SeatBinding }): boolean
@@ -463,6 +463,9 @@ local function createTeams(
 		boatModel.PrimaryPart = physicsPart
 		boatModel.Parent = boatsFolder
 
+		physicsPart.AssemblyLinearVelocity = Vector3.zero
+		physicsPart.AssemblyAngularVelocity = Vector3.zero
+
 		local boat = BoatService.registerBoat(boatModel, {
 			id = boatId,
 			physicsPart = physicsPart,
@@ -526,6 +529,10 @@ function GameModeService.getPlayerSession(player: Player): SessionRecord?
 end
 
 function GameModeService.requestMode(player: Player, modeId: number): boolean
+	if SettingsConfig.INTRO_ENABLED and player:GetAttribute("ModeInputAllowed") ~= true then
+		return false
+	end
+
 	local mode = GameModeConfig.getMode(modeId)
 	if not mode then
 		warn(`[GameMode] Unbekannter Modus: {modeId}`)

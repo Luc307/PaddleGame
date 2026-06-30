@@ -34,6 +34,7 @@ local seatToBoatId: { [BasePart]: string } = {}
 local playerBoatId: { [Player]: string } = {}
 local strokePlayBroadcaster: StrokePlayBroadcaster? = nil
 local heartbeatConnection: RBXScriptConnection? = nil
+local impulseToken: { [Player]: number } = {}
 
 local function weldModelToPhysicsPart(model: Model, physicsPart: BasePart)
 	for _, descendant in model:GetDescendants() do
@@ -164,6 +165,11 @@ function BoatService.registerBoat(
 	end
 
 	boats[id] = record
+
+	physicsPart.AssemblyLinearVelocity = Vector3.zero
+	physicsPart.AssemblyAngularVelocity = Vector3.zero
+	BoatPhysics.stabilize(physicsPart)
+
 	ensureHeartbeat()
 
 	return record
@@ -269,16 +275,39 @@ function BoatService.addStroke(player: Player, side: PaddleSide): boolean
 	boat.lastStrokeAt[player] = now
 	boat.lastPaddleAt = now
 
-	BoatPhysics.applyStroke(boat.physicsPart, side, PaddleConfig)
-
 	if strokePlayBroadcaster then
 		strokePlayBroadcaster(boat, side, player)
 	end
+
+	impulseToken[player] = (impulseToken[player] or 0) + 1
+	local token = impulseToken[player]
+	local impulseDelay = math.max(
+		PaddleConfig.STROKE_ANIM_DURATION * PaddleConfig.STROKE_IMPULSE_DELAY_FRACTION,
+		0.05
+	)
+
+	task.delay(impulseDelay, function()
+		if impulseToken[player] ~= token then
+			return
+		end
+
+		local activeBoat = BoatService.getPlayerBoat(player)
+		if not activeBoat or activeBoat ~= boat then
+			return
+		end
+
+		if not boat.physicsPart.Parent then
+			return
+		end
+
+		BoatPhysics.applyStroke(boat.physicsPart, side, PaddleConfig)
+	end)
 
 	return true
 end
 
 function BoatService.onPlayerRemoving(player: Player)
+	impulseToken[player] = (impulseToken[player] or 0) + 1
 	BoatService.removeOccupant(player)
 end
 
