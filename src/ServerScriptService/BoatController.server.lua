@@ -3,15 +3,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerStorage = game:GetService("ServerStorage")
 
 local BoatService = require(ServerStorage.Modules.BoatService)
-local BoatStateSync = require(ServerStorage.Modules.BoatStateSync)
 local GameModeService = require(ServerStorage.Modules.GameMode.GameModeService)
 local Remotes = require(ReplicatedStorage.Modules.RemoteRegistry)
 
 local BoatPaddleEvent = Remotes.Events.BoatPaddle
-local BoatDriverStrokeEvent = Remotes.Events.BoatDriverStroke
+local BoatStrokePlayEvent = Remotes.Events.BoatStrokePlay
 local BoatControlEvent = Remotes.Events.BoatControl
-local BoatCheckpointEvent = Remotes.Events.BoatCheckpoint
-local BoatAuthorityStateEvent = Remotes.Events.BoatAuthorityState
 local RequestGameModeEvent = Remotes.Events.RequestGameMode
 
 GameModeService.init({
@@ -25,13 +22,9 @@ local function notifyControl(
 	active: boolean,
 	boatId: string?,
 	paddleSide: string?,
-	isDriver: boolean?,
-	useVisualBoat: boolean?,
-	attachOffset: CFrame?,
-	seatName: string?,
-	seatLocalOffset: CFrame?
+	teamControls: boolean?
 )
-	BoatControlEvent:FireClient(player, active, boatId, paddleSide, isDriver, useVisualBoat, attachOffset, seatName, seatLocalOffset)
+	BoatControlEvent:FireClient(player, active, boatId, paddleSide, teamControls)
 end
 
 local function onSeated(player: Player, humanoid: Humanoid, active: boolean, seatPart: BasePart?)
@@ -43,8 +36,7 @@ local function onSeated(player: Player, humanoid: Humanoid, active: boolean, sea
 
 		local binding = BoatService.addOccupant(player, boat, seatPart)
 		if binding then
-			notifyControl(player, true, boat.id, binding.paddleSide, true, false, CFrame.new(0, 3, 0), binding.part.Name, CFrame.new(0, 3, 0))
-			print(`[Boat] {player.Name} steuerung aktiviert ({boat.id})`)
+			notifyControl(player, true, boat.id, binding.paddleSide, boat.teamControls)
 		end
 	else
 		if GameModeService.isPlayerLocked(player) then
@@ -53,8 +45,7 @@ local function onSeated(player: Player, humanoid: Humanoid, active: boolean, sea
 
 		if BoatService.getPlayerBoat(player) then
 			BoatService.removeOccupant(player)
-			notifyControl(player, false, nil, nil, nil, nil, nil, nil, nil)
-			print(`[Boat] {player.Name} steuerung deaktiviert`)
+			notifyControl(player, false, nil, nil, nil)
 		end
 	end
 end
@@ -81,37 +72,20 @@ local function onPlayerAdded(player: Player)
 	end
 end
 
-local function broadcastStroke(sourcePlayer: Player, boat: BoatService.BoatRecord, side: BoatService.PaddleSide, strokeTime: number)
+BoatService.setStrokePlayBroadcaster(function(boat, side, sourcePlayer)
 	for _, occupant in BoatService.getOccupants(boat) do
 		if occupant ~= sourcePlayer then
-			BoatDriverStrokeEvent:FireClient(occupant, boat.id, side, strokeTime)
+			BoatStrokePlayEvent:FireClient(occupant, boat.id, side, 1)
 		end
 	end
-end
+end)
 
-BoatPaddleEvent.OnServerEvent:Connect(function(player: Player, side: string, startTime: number?)
+BoatPaddleEvent.OnServerEvent:Connect(function(player: Player, side: string, _startTime: number?)
 	if side ~= "left" and side ~= "right" then
 		return
 	end
 
-	local ok, boat, strokeTime = BoatService.addStroke(player, side :: BoatService.PaddleSide, startTime)
-	if not ok or not boat then
-		return
-	end
-
-	if strokeTime then
-		broadcastStroke(player, boat, side :: BoatService.PaddleSide, strokeTime)
-	end
-end)
-
-BoatService.setAuthorityStateBroadcaster(function(boat, payload)
-	for _, occupant in BoatService.getOccupants(boat) do
-		BoatAuthorityStateEvent:FireClient(occupant, payload)
-	end
-end)
-
-BoatCheckpointEvent.OnServerEvent:Connect(function(player: Player, payload, force: boolean?)
-	BoatStateSync.tryApply(player, payload, force == true)
+	BoatService.addStroke(player, side :: BoatService.PaddleSide)
 end)
 
 RequestGameModeEvent.OnServerEvent:Connect(function(player: Player, modeId: number)
@@ -120,7 +94,7 @@ end)
 
 local boatModel = workspace:WaitForChild("Boat Model", 30)
 if boatModel and boatModel:IsA("Model") then
-	BoatService.registerBoat(boatModel, { serverAuthority = false })
+	BoatService.registerBoat(boatModel, { teamControls = false })
 else
 	warn("[BoatController] workspace['Boat Model'] nicht gefunden")
 end

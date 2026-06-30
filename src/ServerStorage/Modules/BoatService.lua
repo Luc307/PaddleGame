@@ -1,11 +1,11 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
 
-local BoatCheckpoint = require(ReplicatedStorage.Modules.BoatCheckpoint)
-local BoatConfig = require(ReplicatedStorage.Modules.BoatConfig)
 local BoatPhysics = require(ReplicatedStorage.Modules.BoatPhysics)
-local PlayerAttachmentService = require(script.Parent.GameMode.PlayerAttachmentService)
+local PaddleConfig = require(ReplicatedStorage.Modules.PaddleConfig)
+local BuoyancyService = require(ServerStorage.Modules.BuoyancyService)
 
 export type PaddleSide = BoatPhysics.PaddleSide
 
@@ -14,44 +14,66 @@ export type SeatBinding = {
 	paddleSide: PaddleSide?,
 }
 
-export type AuthorityStateBroadcaster = (boat: BoatRecord, payload: BoatCheckpoint.CheckpointPayload) -> ()
+export type StrokePlayBroadcaster = (boat: BoatRecord, side: PaddleSide, sourcePlayer: Player) -> ()
 
 export type BoatRecord = {
 	id: string,
 	model: Model,
 	physicsPart: BasePart,
 	seatBindings: { SeatBinding },
-	strokes: { BoatPhysics.Stroke },
 	occupants: { [Player]: SeatBinding },
+	teamControls: boolean,
 	lastStrokeAt: { [Player]: number },
-	serverAuthority: boolean,
-	driver: Player?,
-	strokeCount: number,
-	kinematicState: BoatPhysics.KinematicState?,
-	lastIdleBroadcastAt: number,
+	lastPaddleAt: number,
 }
-
-export type PaddleValidator = (player: Player, boat: BoatRecord, side: PaddleSide) -> boolean
 
 local BoatService = {}
 
 local boats: { [string]: BoatRecord } = {}
 local seatToBoatId: { [BasePart]: string } = {}
 local playerBoatId: { [Player]: string } = {}
-local paddleValidator: PaddleValidator = function(player, boat, side)
-	local binding = boat.occupants[player]
-	if not binding then
-		return false
+local strokePlayBroadcaster: StrokePlayBroadcaster? = nil
+local heartbeatConnection: RBXScriptConnection? = nil
+
+local function weldModelToPhysicsPart(model: Model, physicsPart: BasePart)
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("BasePart") and descendant ~= physicsPart then
+			descendant.Anchored = false
+			if not descendant:FindFirstChildWhichIsA("WeldConstraint") then
+				local weld = Instance.new("WeldConstraint")
+				weld.Part0 = physicsPart
+				weld.Part1 = descendant
+				weld.Parent = physicsPart
+			end
+		end
 	end
-	if binding.paddleSide and binding.paddleSide ~= side then
-		return false
-	end
-	return true
+
+	physicsPart.Anchored = false
+	physicsPart.CanCollide = true
 end
 
-local heartbeatConnection: RBXScriptConnection? = nil
-local heartbeatAccumulator = 0
-local authorityStateBroadcaster: AuthorityStateBroadcaster? = nil
+local function ensureHeartbeat()
+	if heartbeatConnection then
+		return
+	end
+
+	heartbeatConnection = RunService.Heartbeat:Connect(function(dt)
+		local now = Workspace:GetServerTimeNow()
+		for _, boat in boats do
+			if not next(boat.occupants) then
+				continue
+			end
+
+			BoatPhysics.stabilize(boat.physicsPart)
+
+			if now - boat.lastPaddleAt > PaddleConfig.STROKE_COOLDOWN * 2 then
+				BoatPhysics.applyCoastDrag(boat.physicsPart, dt, PaddleConfig)
+			end
+		end
+
+		BuoyancyService.updateAll(PaddleConfig)
+	end)
+end
 
 function BoatService.moveModelByAnchor(model: Model, anchorPart: BasePart, targetCFrame: CFrame)
 	local delta = targetCFrame * anchorPart.CFrame:Inverse()
@@ -63,89 +85,8 @@ function BoatService.moveModelByAnchor(model: Model, anchorPart: BasePart, targe
 	end
 end
 
-local function syncServerKinematic(boat: BoatRecord)
-	local state = boat.kinematicState
-	if not state then
-		return
-	end
-
-	BoatService.moveModelByAnchor(boat.model, boat.physicsPart, state.cframe)
-	boat.physicsPart.AssemblyLinearVelocity = state.linearVelocity
-	boat.physicsPart.AssemblyAngularVelocity = state.angularVelocity
-	PlayerAttachmentService.syncPositions()
-end
-
-local function stepServerKinematic(boat: BoatRecord, now: number, dt: number)
-	if not boat.kinematicState then
-		return
-	end
-
-	if #boat.strokes > 0 then
-		boat.strokes = BoatPhysics.applyKinematic(boat.kinematicState, boat.strokes, now, dt, BoatConfig)
-	end
-
-	syncServerKinematic(boat)
-end
-
-local function ensureHeartbeat()
-	if heartbeatConnection then
-		return
-	end
-
-	heartbeatConnection = RunService.Heartbeat:Connect(function(dt)
-		heartbeatAccumulator += dt
-		local fixedDt = BoatConfig.FIXED_TIMESTEP
-
-		while heartbeatAccumulator >= fixedDt do
-			local now = Workspace:GetServerTimeNow()
-			for _, boat in boats do
-				if not next(boat.occupants) or not boat.serverAuthority or not boat.kinematicState then
-					continue
-				end
-
-				boat.strokes = BoatPhysics.applyKinematic(boat.kinematicState, boat.strokes, now, fixedDt, BoatConfig)
-				syncServerKinematic(boat)
-			end
-
-			heartbeatAccumulator -= fixedDt
-		end
-	end)
-end
-
-local function canSetNetworkOwner(part: BasePart): boolean
-	local root = part.AssemblyRootPart
-	return root ~= nil and not root.Anchored
-end
-
-local function setDriverOwnership(player: Player, part: BasePart)
-	if not canSetNetworkOwner(part) then
-		return
-	end
-
-	local root = part.AssemblyRootPart
-	if root then
-		pcall(function()
-			root:SetNetworkOwnershipAuto(false)
-			root:SetNetworkOwner(player)
-		end)
-	end
-end
-
-local function setServerOwnership(part: BasePart)
-	if not canSetNetworkOwner(part) then
-		return
-	end
-
-	local root = part.AssemblyRootPart
-	if root then
-		pcall(function()
-			root:SetNetworkOwner(nil)
-		end)
-	end
-end
-
-function BoatService.setPaddleValidator(validator: PaddleValidator)
-	paddleValidator = validator
+function BoatService.setStrokePlayBroadcaster(broadcaster: StrokePlayBroadcaster?)
+	strokePlayBroadcaster = broadcaster
 end
 
 function BoatService.getBoat(id: string): BoatRecord?
@@ -174,7 +115,7 @@ function BoatService.registerBoat(
 		id: string?,
 		physicsPart: BasePart?,
 		seats: { SeatBinding }?,
-		serverAuthority: boolean?,
+		teamControls: boolean?,
 	}?
 )
 	local id = if options and options.id then options.id else model.Name
@@ -202,36 +143,21 @@ function BoatService.registerBoat(
 		then options.physicsPart
 		else seatBindings[1].part
 
+	local teamControls = if options and options.teamControls ~= nil then options.teamControls else false
+
+	weldModelToPhysicsPart(model, physicsPart)
+	BuoyancyService.attach(physicsPart)
+
 	local record: BoatRecord = {
 		id = id,
 		model = model,
 		physicsPart = physicsPart,
 		seatBindings = seatBindings,
-		strokes = {},
 		occupants = {},
+		teamControls = teamControls,
 		lastStrokeAt = {},
-		serverAuthority = if options and options.serverAuthority ~= nil then options.serverAuthority else true,
-		driver = nil,
-		strokeCount = 0,
-		kinematicState = nil,
-		lastIdleBroadcastAt = 0,
+		lastPaddleAt = 0,
 	}
-
-	if record.serverAuthority then
-		for _, descendant in model:GetDescendants() do
-			if descendant:IsA("BasePart") then
-				descendant.Anchored = true
-			end
-		end
-
-		record.kinematicState = {
-			cframe = physicsPart.CFrame,
-			linearVelocity = Vector3.zero,
-			angularVelocity = Vector3.zero,
-		}
-		syncServerKinematic(record)
-		setServerOwnership(record.physicsPart)
-	end
 
 	for _, binding in seatBindings do
 		seatToBoatId[binding.part] = id
@@ -257,63 +183,25 @@ function BoatService.unregisterBoat(id: string)
 		seatToBoatId[binding.part] = nil
 	end
 
+	BuoyancyService.detach(record.physicsPart)
 	boats[id] = nil
-end
-
-local function countOccupants(boat: BoatRecord): number
-	local total = 0
-	for _ in boat.occupants do
-		total += 1
-	end
-	return total
-end
-
-local function getFirstOccupant(boat: BoatRecord): Player?
-	for occupant in boat.occupants do
-		return occupant
-	end
-	return nil
-end
-
-local function attachOccupant(player: Player, boat: BoatRecord, binding: SeatBinding, asDriver: boolean?): SeatBinding
-	local isFirstOccupant = countOccupants(boat) == 0
-	local shouldDrive = asDriver == true or (asDriver == nil and isFirstOccupant)
-
-	boat.occupants[player] = binding
-	playerBoatId[player] = boat.id
-
-	if shouldDrive then
-		boat.driver = player
-		boat.strokes = {}
-	end
-
-	if boat.serverAuthority and boat.kinematicState then
-		boat.kinematicState.cframe = boat.physicsPart.CFrame
-		boat.kinematicState.linearVelocity = Vector3.zero
-		boat.kinematicState.angularVelocity = Vector3.zero
-		syncServerKinematic(boat)
-	end
-
-	if boat.serverAuthority then
-		setServerOwnership(boat.physicsPart)
-	elseif shouldDrive then
-		setDriverOwnership(player, boat.physicsPart)
-	end
-
-	return binding
 end
 
 function BoatService.addOccupant(player: Player, boat: BoatRecord, seatPart: BasePart): SeatBinding?
 	for _, binding in boat.seatBindings do
 		if binding.part == seatPart then
-			return attachOccupant(player, boat, binding)
+			boat.occupants[player] = binding
+			playerBoatId[player] = boat.id
+			return binding
 		end
 	end
 	return nil
 end
 
-function BoatService.addOccupantBinding(player: Player, boat: BoatRecord, binding: SeatBinding, asDriver: boolean?): SeatBinding
-	return attachOccupant(player, boat, binding, asDriver)
+function BoatService.addOccupantBinding(player: Player, boat: BoatRecord, binding: SeatBinding): SeatBinding
+	boat.occupants[player] = binding
+	playerBoatId[player] = boat.id
+	return binding
 end
 
 function BoatService.removeOccupant(player: Player)
@@ -326,38 +214,9 @@ function BoatService.removeOccupant(player: Player)
 	if boat then
 		boat.occupants[player] = nil
 		boat.lastStrokeAt[player] = nil
-		boat.strokes = {}
-
-		if boat.driver == player then
-			boat.driver = getFirstOccupant(boat)
-		end
-
-		local nextDriver = boat.driver
-		if boat.serverAuthority then
-			setServerOwnership(boat.physicsPart)
-		elseif nextDriver then
-			setDriverOwnership(nextDriver, boat.physicsPart)
-		else
-			boat.driver = nil
-			setServerOwnership(boat.physicsPart)
-		end
 	end
 
 	playerBoatId[player] = nil
-end
-
-function BoatService.getOccupantCount(boat: BoatRecord): number
-	return countOccupants(boat)
-end
-
-function BoatService.getOtherOccupants(boat: BoatRecord, player: Player): { Player }
-	local others = {}
-	for occupant in boat.occupants do
-		if occupant ~= player then
-			table.insert(others, occupant)
-		end
-	end
-	return others
 end
 
 function BoatService.getOccupants(boat: BoatRecord): { Player }
@@ -368,197 +227,55 @@ function BoatService.getOccupants(boat: BoatRecord): { Player }
 	return occupants
 end
 
-function BoatService.forEachActiveServerBoat(callback: (BoatRecord) -> ())
-	for _, boat in boats do
-		if boat.serverAuthority and next(boat.occupants) then
-			callback(boat)
-		end
-	end
-end
-
-function BoatService.addStroke(player: Player, side: PaddleSide, startTime: number?): (boolean, BoatRecord?, number?)
-	if not BoatService.tryPaddle(player, side) then
-		return false, nil, nil
-	end
-
-	local boat = BoatService.getPlayerBoat(player)
-	if not boat then
-		return false, nil, nil
-	end
-
-	local strokeTime = if typeof(startTime) == "number" then startTime else Workspace:GetServerTimeNow()
-
-	if boat.serverAuthority and boat.kinematicState then
-		table.insert(boat.strokes, {
-			side = side,
-			startTime = strokeTime,
-		})
-		boat.strokeCount += 1
-	end
-
-	return true, boat, strokeTime
-end
-
-function BoatService.getStrokeCount(boat: BoatRecord): number
-	return boat.strokeCount
-end
-
-function BoatService.setAuthorityStateBroadcaster(broadcaster: AuthorityStateBroadcaster?)
-	authorityStateBroadcaster = broadcaster
-end
-
-function BoatService.buildAuthorityPayload(boat: BoatRecord): BoatCheckpoint.CheckpointPayload?
-	local state = boat.kinematicState
-	if not state then
-		return nil
-	end
-
-	return {
-		boatId = boat.id,
-		serverTime = Workspace:GetServerTimeNow(),
-		cframe = state.cframe,
-		linearVelocity = state.linearVelocity,
-		angularVelocity = state.angularVelocity,
-		strokeCount = boat.strokeCount,
-	}
-end
-
-function BoatService.broadcastAuthorityState(boat: BoatRecord)
-	if not authorityStateBroadcaster then
-		return
-	end
-
-	local payload = BoatService.buildAuthorityPayload(boat)
-	if payload then
-		authorityStateBroadcaster(boat, payload)
-	end
-end
-
-function BoatService.validateCheckpoint(
-	boat: BoatRecord,
-	payload: BoatCheckpoint.CheckpointPayload,
-	_force: boolean?
-): (boolean, string?)
-	if typeof(payload.cframe) ~= "CFrame" then
-		return false, "invalid_cframe"
-	end
-
-	if typeof(payload.linearVelocity) ~= "Vector3" or typeof(payload.angularVelocity) ~= "Vector3" then
-		return false, "invalid_velocity"
-	end
-
-	local state = boat.kinematicState
-	if not state then
-		return false, "no_kinematic_state"
-	end
-
-	if typeof(payload.strokeCount) == "number" and payload.strokeCount < boat.strokeCount then
-		return false, "stale_stroke_count"
-	end
-
-	local _delta, canSync, shouldReject = BoatCheckpoint.evaluateDelta(state.cframe, payload.cframe)
-
-	if shouldReject then
-		return false, "delta_too_large"
-	end
-
-	if not canSync then
-		return false, "delta_out_of_sync_range"
-	end
-
-	return true, "validated"
-end
-
-function BoatService.applyCheckpoint(
-	boat: BoatRecord,
-	payload: BoatCheckpoint.CheckpointPayload,
-	force: boolean?
-): (boolean, string?)
-	if typeof(payload.cframe) ~= "CFrame" then
-		return false, "invalid_cframe"
-	end
-
-	if typeof(payload.linearVelocity) ~= "Vector3" or typeof(payload.angularVelocity) ~= "Vector3" then
-		return false, "invalid_velocity"
-	end
-
-	local state = boat.kinematicState
-	if not state then
-		return false, "no_kinematic_state"
-	end
-
-	if typeof(payload.strokeCount) == "number" and payload.strokeCount < boat.strokeCount then
-		return false, "stale_stroke_count"
-	end
-
-	local delta = (state.cframe.Position - payload.cframe.Position).Magnitude
-
-	if delta > BoatCheckpoint.HARD_LIMIT then
-		return false, "delta_too_large"
-	end
-
-	if force == true then
-		state.cframe = payload.cframe
-		state.linearVelocity = payload.linearVelocity
-		state.angularVelocity = payload.angularVelocity
-		syncServerKinematic(boat)
-		return true, "forced"
-	end
-
-	if typeof(payload.strokeCount) ~= "number" or payload.strokeCount < boat.strokeCount then
-		return false, "stale_stroke_count"
-	end
-
-	local _delta, canSync, shouldReject = BoatCheckpoint.evaluateDelta(state.cframe, payload.cframe)
-	if shouldReject or not canSync then
-		return false, "delta_out_of_sync_range"
-	end
-
-	if delta <= BoatCheckpoint.SOFT_LIMIT then
-		state.cframe = state.cframe:Lerp(payload.cframe, BoatCheckpoint.SOFT_BLEND)
-		state.linearVelocity = state.linearVelocity:Lerp(payload.linearVelocity, BoatCheckpoint.SOFT_BLEND)
-		state.angularVelocity = state.angularVelocity:Lerp(payload.angularVelocity, BoatCheckpoint.SOFT_BLEND)
-	else
-		state.cframe = payload.cframe
-		state.linearVelocity = payload.linearVelocity
-		state.angularVelocity = payload.angularVelocity
-	end
-
-	syncServerKinematic(boat)
-	return true, "applied"
-end
-
-function BoatService.tryPaddle(player: Player, side: PaddleSide): (boolean, number?)
+function BoatService.tryPaddle(player: Player, side: PaddleSide): boolean
 	if side ~= "left" and side ~= "right" then
 		return false
 	end
 
 	local boat = BoatService.getPlayerBoat(player)
 	if not boat then
-		return false, nil
+		return false
 	end
 
-	if not paddleValidator(player, boat, side) then
-		return false, nil
+	local binding = boat.occupants[player]
+	if not binding then
+		return false
 	end
 
-	local now = os.clock()
+	if binding.paddleSide and binding.paddleSide ~= side then
+		return false
+	end
+
+	local now = Workspace:GetServerTimeNow()
 	local lastAt = boat.lastStrokeAt[player] or 0
-	if now - lastAt < BoatConfig.STROKE_COOLDOWN then
-		return false, nil
+	if now - lastAt < PaddleConfig.STROKE_COOLDOWN then
+		return false
 	end
 
+	return true
+end
+
+function BoatService.addStroke(player: Player, side: PaddleSide): boolean
+	if not BoatService.tryPaddle(player, side) then
+		return false
+	end
+
+	local boat = BoatService.getPlayerBoat(player)
+	if not boat then
+		return false
+	end
+
+	local now = Workspace:GetServerTimeNow()
 	boat.lastStrokeAt[player] = now
+	boat.lastPaddleAt = now
 
-	return true, now
-end
+	BoatPhysics.applyStroke(boat.physicsPart, side, PaddleConfig)
 
-function BoatService.getDriver(boat: BoatRecord): Player?
-	return boat.driver
-end
+	if strokePlayBroadcaster then
+		strokePlayBroadcaster(boat, side, player)
+	end
 
-function BoatService.isTeamBoat(boat: BoatRecord): boolean
-	return countOccupants(boat) > 1
+	return true
 end
 
 function BoatService.onPlayerRemoving(player: Player)

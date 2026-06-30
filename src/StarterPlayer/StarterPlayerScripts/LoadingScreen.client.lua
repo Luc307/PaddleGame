@@ -4,6 +4,7 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local Remotes = require(ReplicatedStorage.Modules.RemoteRegistry) :: ModuleScript
+local SettingsConfig = require(ReplicatedStorage.Modules.SettingsConfig)
 local LoadingEvent = Remotes.Events.Loading
 
 local player = Players.LocalPlayer
@@ -347,6 +348,13 @@ end
 LoadingEvent.OnClientEvent:Connect(function(action: string, forward: Vector3?)
 	local character = player.Character
 	if not character then
+		return
+	end
+
+	if not SettingsConfig.INTRO_ENABLED then
+		if action == "Skip" then
+			skipIntro()
+		end
 		return
 	end
 

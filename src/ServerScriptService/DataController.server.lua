@@ -3,6 +3,7 @@ local SS = game:GetService("ServerStorage")
 local RS = game:GetService("ReplicatedStorage")
 
 local Remotes = require(RS.Modules.RemoteRegistry)
+local SettingsConfig = require(RS.Modules.SettingsConfig)
 
 local DataEvent = Remotes.Events.Data
 local LoadingEvent = Remotes.Events.Loading
@@ -20,7 +21,7 @@ local DANCE_FALLBACK_DURATION = 4
 local SPAWN_DROP_HEIGHT = 10
 local LANDING_TIMEOUT = 4
 local INTRO_READY_WAIT = 0.35
-local TESTING = true
+local TESTING = false
 
 local takenSlots: { [number]: boolean } = {}
 local slotByPlayer: { [number]: number } = {}
@@ -264,10 +265,15 @@ local function ApplyBlockyR15(character: Model)
 	humanoid:ApplyDescription(description)
 end
 
+local function skipIntroToSpawn(player: Player, character: Model)
+	ApplyBlockyR15(character)
+	character:PivotTo(getSpawnCFrame())
+	skipIntro(player, character)
+end
+
 local function onCharacterAdded(player: Player, character: Model)
-	if TESTING then
-		ApplyBlockyR15(character)
-		skipIntro(player, character)
+	if TESTING or not SettingsConfig.INTRO_ENABLED then
+		skipIntroToSpawn(player, character)
 		return
 	end
 

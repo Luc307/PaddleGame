@@ -2,170 +2,29 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
 
-local BoatConfig = require(ReplicatedStorage.Modules.BoatConfig) :: ModuleScript
-local BoatPhysics = require(ReplicatedStorage.Modules.BoatPhysics) :: ModuleScript
-local Remotes = require(ReplicatedStorage.Modules.RemoteRegistry) :: ModuleScript
+local Remotes = require(ReplicatedStorage.Modules.RemoteRegistry)
 
-local BoatCharacterFollower = require(ReplicatedStorage.Modules.BoatCharacterFollower)
-local BoatTeamCharacterPlacer = require(ReplicatedStorage.Modules.BoatTeamCharacterPlacer)
-local BoatVisualService = require(ReplicatedStorage.Modules.BoatVisualService)
+local PaddleAnimationController = require(script.Parent.PaddleAnimationController)
 
 local player = Players.LocalPlayer
 
 local BoatPaddleEvent = Remotes.Events.BoatPaddle
-local BoatDriverStrokeEvent = Remotes.Events.BoatDriverStroke
+local BoatStrokePlayEvent = Remotes.Events.BoatStrokePlay
 local BoatControlEvent = Remotes.Events.BoatControl
-local BoatCheckpointEvent = Remotes.Events.BoatCheckpoint
-local BoatAuthorityStateEvent = Remotes.Events.BoatAuthorityState
 local RequestGameModeEvent = Remotes.Events.RequestGameMode
 local RaceVisualsEvent = Remotes.Events.RaceVisuals
 local QueueStatusEvent = Remotes.Events.QueueStatus
 
-local PADDLE_LEFT_ANIM_ID: string? = nil
-local PADDLE_RIGHT_ANIM_ID: string? = nil
-local STROKE_DURATION = BoatConfig.STROKE_DURATION
-local PHYSICS_RENDER_STEP = "BoatFreeRoamPhysics"
-
 local controlActive = false
 local allowedPaddleSide: string? = nil
 local activeBoatId: string? = nil
-local isDriver = false
-local useVisualBoat = false
-local attachOffset = CFrame.new(0, 3, 0)
-local seatLocalOffset = CFrame.new(0, 3, 0)
-local seatName: string? = nil
-
-local physicsPart: BasePart? = nil
-local strokes: { BoatPhysics.Stroke } = {}
+local teamControls = false
 
 local inputConnection: RBXScriptConnection? = nil
 local visualConnection: RBXScriptConnection? = nil
-local physicsConnection: RBXScriptConnection? = nil
-local animator: Animator? = nil
-local animTracks: { [string]: AnimationTrack } = {}
 local transparentBoatIds: { [string]: boolean } = {}
 local transparentUserIds: { [number]: boolean } = {}
-local teamRoster: { BoatTeamCharacterPlacer.TeamRosterEntry } = {}
-
-local function getStrokeAnimId(side: string): string?
-	if side == "right" then
-		return PADDLE_RIGHT_ANIM_ID
-	end
-	return PADDLE_LEFT_ANIM_ID
-end
-
-local function loadAnimTracks(humanoid: Humanoid)
-	animTracks = {}
-
-	animator = humanoid:FindFirstChildOfClass("Animator")
-	if not animator then
-		animator = Instance.new("Animator")
-		if animator then
-			animator.Parent = humanoid
-		end
-	end
-
-	for _, side in { "left", "right" } do
-		local animId = getStrokeAnimId(side)
-		if animId then
-			local animation = Instance.new("Animation")
-			animation.AnimationId = animId
-			animTracks[side] = (animator :: Animator):LoadAnimation(animation)
-		end
-	end
-end
-
-local function playStrokeAnim(side: string)
-	local track = animTracks[side]
-	if not track then
-		return
-	end
-
-	if track.Length > 0 then
-		track:Play(0)
-		track:AdjustSpeed(track.Length / STROKE_DURATION)
-	else
-		track:Play(0)
-	end
-end
-
-local function resolvePhysicsPart(boatId: string?): BasePart?
-	if not boatId then
-		return nil
-	end
-
-	local boatModel = workspace:FindFirstChild(boatId, true)
-	if not boatModel or not boatModel:IsA("Model") then
-		return nil
-	end
-
-	local part = boatModel:FindFirstChild("PhysicsPart", true)
-	if part and part:IsA("BasePart") then
-		return part
-	end
-
-	part = boatModel:FindFirstChild("Seat")
-	if part and part:IsA("BasePart") then
-		return part
-	end
-
-	part = boatModel:FindFirstChild("SeatRight", true)
-	if part and part:IsA("BasePart") then
-		return part
-	end
-
-	return nil
-end
-
-local function getStrokeTime(): number
-	return Workspace:GetServerTimeNow()
-end
-
-local function applyFreeRoamStroke(side: string, startTime: number)
-	local part = physicsPart
-	if not part then
-		return
-	end
-
-	table.insert(strokes, { side = side :: BoatPhysics.PaddleSide, startTime = startTime })
-	strokes = BoatPhysics.apply(part, strokes, getStrokeTime(), 1 / 60, BoatConfig)
-end
-
-local function updateFreeRoamPhysics(dt: number)
-	local part = physicsPart
-	if not part or not controlActive or useVisualBoat then
-		return
-	end
-
-	strokes = BoatVisualService.updateFreeRoam(dt, part, strokes)
-end
-
-local function sendCheckpointToServer(force: boolean)
-	if not useVisualBoat or not activeBoatId then
-		return
-	end
-
-	if not force and not BoatVisualService.shouldSendCheckpoint(activeBoatId) then
-		return
-	end
-
-	local payload = BoatVisualService.getCheckpoint(activeBoatId)
-	if payload then
-		BoatCheckpointEvent:FireServer(payload, force)
-	end
-end
-
-local function trySendCheckpoint()
-	if not activeBoatId then
-		return
-	end
-	if not BoatVisualService.shouldSendCheckpoint(activeBoatId) then
-		return
-	end
-	sendCheckpointToServer(true)
-end
 
 local function canSendStroke(side: string): boolean
 	if not controlActive then
@@ -182,20 +41,8 @@ local function sendStroke(side: string)
 		return
 	end
 
-	local startTime = getStrokeTime()
-	playStrokeAnim(side)
-
-	if useVisualBoat then
-		sendCheckpointToServer(true)
-	end
-
-	if useVisualBoat and activeBoatId then
-		BoatVisualService.applyStroke(activeBoatId, side, startTime)
-	else
-		applyFreeRoamStroke(side, startTime)
-	end
-
-	BoatPaddleEvent:FireServer(side, startTime)
+	PaddleAnimationController.handleInput(side :: "left" | "right")
+	BoatPaddleEvent:FireServer(side)
 end
 
 local function requestMode(modeId: number)
@@ -236,11 +83,7 @@ local function activateControl(
 	humanoid: Humanoid,
 	boatId: string?,
 	paddleSide: string?,
-	driver: boolean?,
-	visualBoat: boolean?,
-	offset: CFrame?,
-	seatPartName: string?,
-	seatOffset: CFrame?
+	isTeamMode: boolean?
 )
 	if controlActive then
 		deactivateControl()
@@ -250,59 +93,17 @@ local function activateControl(
 		return
 	end
 
-	useVisualBoat = visualBoat == true
-	isDriver = driver == true
-	attachOffset = if typeof(offset) == "CFrame" then offset else CFrame.new(0, 3, 0)
-	seatLocalOffset = if typeof(seatOffset) == "CFrame" then seatOffset else CFrame.new(0, 3, 0)
-	seatName = if typeof(seatPartName) == "string" then seatPartName else nil
-
-	if useVisualBoat then
-		if not BoatVisualService.start(boatId, attachOffset, seatName, seatLocalOffset) then
-			return
-		end
-
-		BoatCharacterFollower.start(function()
-			return BoatVisualService.getCharacterCFrame(boatId)
-		end)
-
-		local character = player.Character
-		local rootPart = if character then character:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
-		if rootPart then
-			pcall(function()
-				rootPart:SetNetworkOwner(player)
-			end)
-		end
-
-		sendCheckpointToServer(true)
-
-		if #teamRoster > 0 then
-			BoatTeamCharacterPlacer.start(boatId, teamRoster)
-		end
-	else
-		physicsPart = resolvePhysicsPart(boatId)
-		if not physicsPart then
-			return
-		end
-		strokes = {}
-		RunService:BindToRenderStep(PHYSICS_RENDER_STEP, Enum.RenderPriority.Input.Value, updateFreeRoamPhysics)
-	end
-
 	controlActive = true
 	allowedPaddleSide = paddleSide
 	activeBoatId = boatId
+	teamControls = isTeamMode == true
 
-	loadAnimTracks(humanoid)
+	PaddleAnimationController.init(humanoid, teamControls)
 	inputConnection = UserInputService.InputBegan:Connect(onInputBegan)
 
-	if useVisualBoat then
-		if not physicsConnection then
-			physicsConnection = RunService.Heartbeat:Connect(trySendCheckpoint)
-		end
-	end
-
-	print(if useVisualBoat
-		then if isDriver then "steuerung aktiviert (visual, driver)" else `steuerung aktiviert (visual, team, {paddleSide})`
-		else "steuerung aktiviert (free roam)")
+	print(if teamControls
+		then `steuerung aktiviert (team, {paddleSide or "both"})`
+		else "steuerung aktiviert (solo)")
 end
 
 local function deactivateControl()
@@ -312,96 +113,17 @@ local function deactivateControl()
 
 	controlActive = false
 	allowedPaddleSide = nil
-
-	if useVisualBoat and activeBoatId then
-		BoatVisualService.stop(activeBoatId)
-		BoatCharacterFollower.stop()
-		BoatTeamCharacterPlacer.stop()
-	elseif physicsPart then
-		RunService:UnbindFromRenderStep(PHYSICS_RENDER_STEP)
-	end
-
 	activeBoatId = nil
-	isDriver = false
-	useVisualBoat = false
-	attachOffset = CFrame.new(0, 3, 0)
-	seatLocalOffset = CFrame.new(0, 3, 0)
-	seatName = nil
-	physicsPart = nil
-	strokes = {}
+	teamControls = false
+
+	PaddleAnimationController.stop()
 
 	if inputConnection then
 		inputConnection:Disconnect()
 		inputConnection = nil
 	end
 
-	if physicsConnection then
-		physicsConnection:Disconnect()
-		physicsConnection = nil
-	end
-
-	for _, track in animTracks do
-		track:Stop(0.1)
-	end
-	animTracks = {}
-	animator = nil
-
 	print("steuerung deaktiviert")
-end
-
-local function resolveOpponentSeat(boatModel: Model): BasePart?
-	local seat = boatModel:FindFirstChild("Seat", true)
-	if seat and seat:IsA("BasePart") then
-		return seat
-	end
-
-	seat = boatModel:FindFirstChild("SeatRight", true)
-	if seat and seat:IsA("BasePart") then
-		return seat
-	end
-
-	seat = boatModel:FindFirstChild("SeatLeft", true)
-	if seat and seat:IsA("BasePart") then
-		return seat
-	end
-
-	return nil
-end
-
-local function syncOpponentCharactersToAuthority()
-	if not next(transparentUserIds) then
-		return
-	end
-
-	for _, otherPlayer in Players:GetPlayers() do
-		if otherPlayer == player or transparentUserIds[otherPlayer.UserId] ~= true then
-			continue
-		end
-
-		local character = otherPlayer.Character
-		local rootPart = if character then character:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
-		if not rootPart then
-			continue
-		end
-
-		for boatId in transparentBoatIds do
-			local boatModel = workspace:FindFirstChild(boatId, true)
-			if not boatModel or not boatModel:IsA("Model") then
-				continue
-			end
-
-			local seat = resolveOpponentSeat(boatModel)
-			if not seat then
-				continue
-			end
-
-			rootPart.Anchored = true
-			rootPart.CFrame = seat.CFrame * CFrame.new(0, 3, 0)
-			rootPart.AssemblyLinearVelocity = Vector3.zero
-			rootPart.AssemblyAngularVelocity = Vector3.zero
-			break
-		end
-	end
 end
 
 local function applyLocalTransparency()
@@ -432,19 +154,7 @@ local function clearLocalTransparency()
 	end
 end
 
-BoatAuthorityStateEvent.OnClientEvent:Connect(function(payload)
-	if typeof(payload) ~= "table" or typeof(payload.boatId) ~= "string" then
-		return
-	end
-
-	if not controlActive or activeBoatId ~= payload.boatId then
-		return
-	end
-
-	BoatVisualService.beginRetarget(payload.boatId, payload)
-end)
-
-BoatDriverStrokeEvent.OnClientEvent:Connect(function(boatId: string, side: string, startTime: number?)
+BoatStrokePlayEvent.OnClientEvent:Connect(function(boatId: string, side: string, speedMultiplier: number?)
 	if not controlActive or activeBoatId ~= boatId then
 		return
 	end
@@ -453,26 +163,15 @@ BoatDriverStrokeEvent.OnClientEvent:Connect(function(boatId: string, side: strin
 		return
 	end
 
-	if useVisualBoat then
-		BoatVisualService.applyStroke(
-			boatId,
-			side,
-			if typeof(startTime) == "number" then startTime else getStrokeTime()
-		)
-	else
-		applyFreeRoamStroke(side, if typeof(startTime) == "number" then startTime else getStrokeTime())
-	end
+	local multiplier = if typeof(speedMultiplier) == "number" then speedMultiplier else 1
+	PaddleAnimationController.playRemoteStroke(side :: "left" | "right", multiplier)
 end)
 
 BoatControlEvent.OnClientEvent:Connect(function(
 	active: boolean,
 	boatId: string?,
 	paddleSide: string?,
-	driver: boolean?,
-	visualBoat: boolean?,
-	offset: CFrame?,
-	seatPartName: string?,
-	seatOffset: CFrame?
+	isTeamMode: boolean?
 )
 	local character = player.Character
 	if not character then
@@ -485,7 +184,7 @@ BoatControlEvent.OnClientEvent:Connect(function(
 	end
 
 	if active then
-		activateControl(humanoid, boatId, paddleSide, driver, visualBoat, offset, seatPartName, seatOffset)
+		activateControl(humanoid, boatId, paddleSide, isTeamMode)
 	else
 		deactivateControl()
 	end
@@ -501,10 +200,8 @@ RaceVisualsEvent.OnClientEvent:Connect(function(data)
 	clearLocalTransparency()
 	transparentBoatIds = {}
 	transparentUserIds = {}
-	teamRoster = {}
 
 	if not data or data.active == false then
-		BoatTeamCharacterPlacer.stop()
 		if visualConnection then
 			visualConnection:Disconnect()
 			visualConnection = nil
@@ -519,30 +216,11 @@ RaceVisualsEvent.OnClientEvent:Connect(function(data)
 		transparentUserIds[userId] = true
 	end
 
-	for _, entry in data.teamRoster or {} do
-		if typeof(entry.userId) == "number" and typeof(entry.seatName) == "string" then
-			table.insert(teamRoster, {
-				userId = entry.userId,
-				seatName = entry.seatName,
-				seatLocalOffset = if typeof(entry.seatLocalOffset) == "CFrame"
-					then entry.seatLocalOffset
-					else CFrame.new(0, 3, 0),
-			})
-		end
-	end
-
-	if controlActive and useVisualBoat and activeBoatId and #teamRoster > 0 then
-		BoatTeamCharacterPlacer.start(activeBoatId, teamRoster)
-	end
-
 	applyLocalTransparency()
 	if visualConnection then
 		visualConnection:Disconnect()
 	end
-	visualConnection = RunService.RenderStepped:Connect(function()
-		syncOpponentCharactersToAuthority()
-		applyLocalTransparency()
-	end)
+	visualConnection = RunService.RenderStepped:Connect(applyLocalTransparency)
 end)
 
 UserInputService.InputBegan:Connect(onModeInputBegan)

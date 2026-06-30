@@ -3,7 +3,7 @@ local PhysicsService = game:GetService("PhysicsService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
-local BoatConfig = require(ReplicatedStorage.Modules.BoatConfig)
+local PaddleConfig = require(ReplicatedStorage.Modules.PaddleConfig)
 local BoatShopConfig = require(ReplicatedStorage.Modules.BoatShopConfig)
 local GameModeConfig = require(ReplicatedStorage.Modules.GameModeConfig)
 local BoatService = require(script.Parent.Parent.BoatService)
@@ -164,17 +164,6 @@ local function getSeatLocalOffset(index: number, teamControls: boolean, dedicate
 	return CFrame.new(if index == 2 then -2.5 else 2.5, 3, 0)
 end
 
-local function getAttachmentOffset(
-	physicsPart: BasePart,
-	seatPart: BasePart,
-	index: number,
-	teamControls: boolean,
-	dedicatedSeats: boolean
-): CFrame
-	local seatOnPhysics = physicsPart.CFrame:ToObjectSpace(seatPart.CFrame)
-	return seatOnPhysics * getSeatLocalOffset(index, teamControls, dedicatedSeats)
-end
-
 local function hasDedicatedTeamSeats(seatBindings: { BoatService.SeatBinding }): boolean
 	if #seatBindings < 2 then
 		return false
@@ -243,26 +232,20 @@ local function activateBoatControl(
 	player: Player,
 	boat: BoatService.BoatRecord,
 	binding: BoatService.SeatBinding,
-	isDriver: boolean,
-	attachOffset: CFrame,
-	seatLocalOffset: CFrame
+	teamControls: boolean
 )
 	local activeRemotes = remotes
 	if not activeRemotes then
 		return
 	end
 
-	BoatService.addOccupantBinding(player, boat, binding, isDriver)
+	BoatService.addOccupantBinding(player, boat, binding)
 	activeRemotes.BoatControl:FireClient(
 		player,
 		true,
 		boat.id,
 		binding.paddleSide,
-		isDriver,
-		true,
-		attachOffset,
-		binding.part.Name,
-		seatLocalOffset
+		teamControls
 	)
 end
 
@@ -270,7 +253,6 @@ local function assignPlayersToBoat(
 	players: { Player },
 	seatBindings: { BoatService.SeatBinding },
 	boat: BoatService.BoatRecord,
-	boatModel: Model,
 	teamControls: boolean
 )
 	local dedicatedSeats = teamControls and hasDedicatedTeamSeats(seatBindings)
@@ -281,11 +263,9 @@ local function assignPlayersToBoat(
 			continue
 		end
 
-		local attachPart = boat.physicsPart
 		local seatLocalOffset = getSeatLocalOffset(index, teamControls, dedicatedSeats)
-		local attachOffset = getAttachmentOffset(attachPart, binding.part, index, teamControls, dedicatedSeats)
-		PlayerAttachmentService.snapWithoutWeld(player, attachPart, attachOffset)
-		activateBoatControl(player, boat, binding, index == 1, attachOffset, seatLocalOffset)
+		PlayerAttachmentService.weldToBoat(player, binding.part, seatLocalOffset)
+		activateBoatControl(player, boat, binding, teamControls)
 	end
 end
 
@@ -296,22 +276,6 @@ local function sendRaceVisuals(session: SessionRecord)
 	end
 
 	for _, viewerTeam in session.teams do
-		local dedicatedSeats = session.mode.teamControls and hasDedicatedTeamSeats(viewerTeam.boat.seatBindings)
-		local teamRoster = {}
-
-		if session.mode.teamControls then
-			for index, rosterPlayer in viewerTeam.players do
-				local binding = viewerTeam.boat.seatBindings[index]
-				if binding then
-					table.insert(teamRoster, {
-						userId = rosterPlayer.UserId,
-						seatName = binding.part.Name,
-						seatLocalOffset = getSeatLocalOffset(index, true, dedicatedSeats),
-					})
-				end
-			end
-		end
-
 		for _, viewer in viewerTeam.players do
 			local transparentBoatIds = {}
 			local transparentUserIds = {}
@@ -329,8 +293,6 @@ local function sendRaceVisuals(session: SessionRecord)
 				active = true,
 				transparentBoatIds = transparentBoatIds,
 				transparentUserIds = transparentUserIds,
-				boatId = viewerTeam.boat.id,
-				teamRoster = teamRoster,
 			})
 		end
 	end
@@ -345,7 +307,7 @@ local function clearRaceVisuals(session: SessionRecord)
 	for _, team in session.teams do
 		for _, player in team.players do
 			activeRemotes.RaceVisuals:FireClient(player, { active = false })
-			activeRemotes.BoatControl:FireClient(player, false, nil, nil, nil, nil, nil, nil, nil)
+			activeRemotes.BoatControl:FireClient(player, false, nil, nil, nil)
 		end
 	end
 end
@@ -493,9 +455,9 @@ local function createTeams(
 		end
 
 		local spawnCFrame = startPart.CFrame
-			* BoatConfig.RACE_SPAWN_SEAT_OFFSET
-			* CFrame.new(0, teamId * BoatConfig.RACE_SPAWN_TEAM_Y_STEP, 0)
-			* CFrame.Angles(0, BoatConfig.RACE_SPAWN_YAW, 0)
+			* PaddleConfig.RACE_SPAWN_SEAT_OFFSET
+			* CFrame.new(0, teamId * PaddleConfig.RACE_SPAWN_TEAM_Y_STEP, 0)
+			* CFrame.Angles(0, PaddleConfig.RACE_SPAWN_YAW, 0)
 
 		BoatService.moveModelByAnchor(boatModel, seatBindings[1].part, spawnCFrame)
 		boatModel.PrimaryPart = physicsPart
@@ -505,7 +467,7 @@ local function createTeams(
 			id = boatId,
 			physicsPart = physicsPart,
 			seats = seatBindings,
-			serverAuthority = true,
+			teamControls = mode.teamControls,
 		})
 		if not boat then
 			boatsFolder:Destroy()
@@ -636,7 +598,7 @@ function GameModeService.startSession(modeId: number, participants: { Player }):
 
 	for _, team in teams do
 		applyTeamCollision(session, team)
-		assignPlayersToBoat(team.players, team.boat.seatBindings, team.boat, team.boatModel, mode.teamControls)
+		assignPlayersToBoat(team.players, team.boat.seatBindings, team.boat, mode.teamControls)
 	end
 
 	session.startedAt = os.clock()

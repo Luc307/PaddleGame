@@ -93,6 +93,10 @@ function PlayerAttachmentService.snapWithoutWeld(player: Player, attachPart: Bas
 	end)
 end
 
+function PlayerAttachmentService.weldToBoat(player: Player, attachPart: BasePart, localOffset: CFrame)
+	PlayerAttachmentService.attach(player, attachPart, localOffset)
+end
+
 function PlayerAttachmentService.syncPositions()
 	for player, record in attachments do
 		if record.weld then

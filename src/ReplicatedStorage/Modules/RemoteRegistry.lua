@@ -56,10 +56,8 @@ end
 return {
 	Events = {
 		BoatPaddle = eventsFolder:WaitForChild("BoatPaddle") :: UnreliableRemoteEvent,
-		BoatDriverStroke = eventsFolder:WaitForChild("BoatDriverStroke") :: UnreliableRemoteEvent,
+		BoatStrokePlay = getOrCreateUnreliableEvent("BoatStrokePlay") :: UnreliableRemoteEvent,
 		BoatControl = eventsFolder:WaitForChild("BoatControl") :: RemoteEvent,
-		BoatCheckpoint = getOrCreateEvent("BoatCheckpoint") :: RemoteEvent,
-		BoatAuthorityState = getOrCreateUnreliableEvent("BoatAuthorityState") :: UnreliableRemoteEvent,
 		RequestGameMode = eventsFolder:WaitForChild("RequestGameMode") :: RemoteEvent,
 		RaceVisuals = eventsFolder:WaitForChild("RaceVisuals") :: RemoteEvent,
 		QueueStatus = eventsFolder:WaitForChild("QueueStatus") :: RemoteEvent,
